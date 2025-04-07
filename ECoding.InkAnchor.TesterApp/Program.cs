@@ -12,18 +12,19 @@ using Image = SixLabors.ImageSharp.Image;
 
 
 /*Generate PDF With raster image*/
+
 /*
 Console.WriteLine("Generating PDF with signature box...");
 
 QuestPDF.Settings.License = LicenseType.Community;
 
-var options = new InkAnchorGeneratorOptions(boxId: 1, pixelWidth: 400, pixelHeight: 300)
+var options = new InkAnchorGeneratorOptions(boxId: 1, pixelWidth: 200, pixelHeight: 100)
 {
     FillColor = null, // transparent
     Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1),
     BoxLabel = new InkAnchorLabel("Please sign here", BoxLabelPlacement.BottomOutsideBox, fontSize: 12),
     MarkerPadding = 2,
-    MarkerPixelSize = 100,
+    MarkerPixelSize = 20,
     MarkerBorderBits = 1
 };
 
@@ -64,8 +65,8 @@ var pdf = Document.Create(container =>
 // Save PDF to file
 pdf.GeneratePdf(@"InkAnchor.pdf");
 Console.WriteLine("PDF generated: output.pdf");
-*/
 
+*/
 
 /*Generate PDF with SVG*/
 /*
@@ -176,7 +177,7 @@ Console.WriteLine($"PDF generated: {outputPath}");
 
 
 
-string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\InkAnchor_page-0001.jpg";
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0002.jpg";
 string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
 
 if (!File.Exists(inputImagePath))
@@ -224,4 +225,3 @@ catch (Exception ex)
     Console.WriteLine("Error while processing the image:");
     Console.WriteLine(ex.Message);
 }
-

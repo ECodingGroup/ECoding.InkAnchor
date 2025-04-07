@@ -94,7 +94,7 @@ public class InkAnchorLabel
 
 public class InkAnchorBorder
 {
-    public InkAnchorBorder(Color? color, int thickness = 1)
+    public InkAnchorBorder(Color? color, int thickness = 1, BorderStyle borderStyle = BorderStyle.Solid, BorderSides borderSides = BorderSides.All)
     {
         if (!color.HasValue)
         { color = Color.Black; }
@@ -104,23 +104,45 @@ public class InkAnchorBorder
 
         Color = color.Value;
         Thickness = thickness;
+        Style = borderStyle;
+        Sides = borderSides;
     }
 
     public Color Color { get; private set; }
     public int Thickness { get; private set; }
+    public BorderStyle Style { get; private set; }
+    public BorderSides Sides { get; private set; }
+
+    [Flags]
+    public enum BorderSides
+    {
+        None = 0,
+        Top = 1,
+        Right = 2,
+        Bottom = 4,
+        Left = 8,
+        All = Top | Right | Bottom | Left
+    }
+
+    public enum BorderStyle
+    {
+        Solid,
+        Dashed,
+        Dotted
+    }
 
 }
 
 public enum BoxLabelPlacement
 {
-    /// <summary>
-    /// This will place the label to top middle of the box, inside it. 
-    /// </summary>
-    TopInsideBox = 1,
-    /// <summary>
-    /// This will place the label to bottom middle of the box, inside it. 
-    /// </summary>
-    BottomInsideBox = 2,
+    ///// <summary>
+    ///// This will place the label to top middle of the box, inside it. 
+    ///// </summary>
+    //TopInsideBox = 1,
+    ///// <summary>
+    ///// This will place the label to bottom middle of the box, inside it. 
+    ///// </summary>
+    //BottomInsideBox = 2,
     /// <summary>
     /// This will place the label to top middle of the box, outside it. 
     /// </summary>
