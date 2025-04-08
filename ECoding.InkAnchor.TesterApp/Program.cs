@@ -18,11 +18,11 @@ Console.WriteLine("Generating PDF with signature box...");
 
 QuestPDF.Settings.License = LicenseType.Community;
 
-var options = new InkAnchorGeneratorOptions(boxId: 1, pixelWidth: 200, pixelHeight: 100)
+var options = new InkAnchorGeneratorOptions(boxId: 2, pixelWidth: 200, pixelHeight: 100)
 {
     FillColor = null, // transparent
-    Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1),
-    BoxLabel = new InkAnchorLabel("Please sign here", BoxLabelPlacement.BottomOutsideBox, fontSize: 12),
+    Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1, InkAnchorBorder.BorderStyle.Solid, InkAnchorBorder.BorderSides.All),
+    BoxLabel = new InkAnchorLabel("Podpis poistníka", BoxLabelPlacement.BottomOutsideBox, fontSize: 14),
     MarkerPadding = 2,
     MarkerPixelSize = 20,
     MarkerBorderBits = 1
@@ -174,10 +174,10 @@ Console.WriteLine($"PDF generated: {outputPath}");
 
 
 
+/*
 
 
-
-string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0002.jpg";
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0001.jpg";
 string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
 
 if (!File.Exists(inputImagePath))
@@ -225,3 +225,11 @@ catch (Exception ex)
     Console.WriteLine("Error while processing the image:");
     Console.WriteLine(ex.Message);
 }
+*/
+
+/*
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\anchor_box_3.png";
+
+using Image<Rgba32> inputImage = Image.Load<Rgba32>(inputImagePath);
+Console.WriteLine(InkAnchorHandler.GetFilledAreaPercentage(inputImage));
+*/

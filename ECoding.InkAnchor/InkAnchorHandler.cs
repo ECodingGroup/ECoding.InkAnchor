@@ -8,6 +8,7 @@ using OpenCvSharp.Aruco;
 using System.Text.Json;
 using static ECoding.InkAnchor.InkAnchorBorder;
 using System.Text;
+using SixLabors.ImageSharp.Advanced;
 
 namespace ECoding.InkAnchor;
 
@@ -42,6 +43,54 @@ public static class InkAnchorHandler
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Evaluates the filled area of an ImageSharp image as a fraction (0.xxx).
+    /// A pixel is considered "filled" if its computed brightness is below the given threshold.
+    /// </summary>
+    /// <param name="image">
+    /// An ImageSharp Image of type Rgba32 to analyze.
+    /// </param>
+    /// <param name="brightnessThreshold">
+    /// The brightness threshold (0-255) below which a pixel is considered "filled".
+    /// Default value is 240, meaning pixels with brightness less than 240 are considered filled.
+    /// </param>
+    /// <returns>
+    /// A double representing the fraction of the image that is filled.
+    /// For example, a return value of 0.05 means 5% of the image pixels are considered filled.
+    /// </returns>
+    public static double GetFilledAreaPercentage(Image<Rgba32> image, byte brightnessThreshold = 240)
+    {
+        int width = image.Width;
+        int height = image.Height;
+        int totalPixels = width * height;
+        int filledPixels = 0;
+
+        // Use the root frame to access pixel data
+        var frame = image.Frames.RootFrame;
+
+        for (int y = 0; y < height; y++)
+        {
+            // Use DangerousGetPixelRowMemory instead of GetPixelRowSpan
+            Span<Rgba32> pixelRow = frame.DangerousGetPixelRowMemory(y).Span;
+
+            for (int x = 0; x < width; x++)
+            {
+                Rgba32 pixel = pixelRow[x];
+
+                // Compute brightness (average of R, G, B)
+                int brightness = (pixel.R + pixel.G + pixel.B) / 3;
+
+                if (brightness < brightnessThreshold)
+                {
+                    filledPixels++;
+                }
+            }
+        }
+
+        double fillRatio = (double)filledPixels / totalPixels;
+        return fillRatio;
     }
 
     #region private helpers
@@ -206,74 +255,44 @@ public static class InkAnchorHandler
         return results;
     }
 
-    private static float Distance(Point2f a, Point2f b)
-    {
-        float dx = b.X - a.X;
-        float dy = b.Y - a.Y;
-        return MathF.Sqrt(dx * dx + dy * dy);
-    }
-
-    private static Point2f[] ReorderCornersClockwise(Point2f[] corners)
-    {
-        // 1) Find centroid
-        float cx = 0, cy = 0;
-        foreach (var pt in corners)
-        {
-            cx += pt.X;
-            cy += pt.Y;
-        }
-        cx /= corners.Length;
-        cy /= corners.Length;
-        var center = new Point2f(cx, cy);
-
-        // 2) Sort by angle from the centroid
-        //    We'll use MathF.Atan2(y - cy, x - cx) to get the angle
-        var withAngles = corners
-            .Select(pt => new { Pt = pt, Angle = MathF.Atan2(pt.Y - cy, pt.X - cx) })
-            .OrderBy(o => o.Angle)
-            .ToList();
-
-        // Now we have them in ascending angle. This typically yields
-        // top-left → top-right → bottom-right → bottom-left (but can vary).
-        // We can keep them as-is or do small checks to ensure a known orientation.
-        // For simplicity, we assume the order is top-left => top-right => bottom-right => bottom-left.
-
-        return withAngles.Select(o => o.Pt).ToArray();
-    }
-
-
     /// <summary>
-    /// Builds a bounding rectangle from the top-left marker corners and the bottom-right marker corners,
-    /// then crops that region from the input image. 
+    /// Crops the region between two markers (A at top-left, B at bottom-right),
+    /// excluding the bounding rectangles of the markers themselves.
     /// </summary>
     private static Mat CropByTwoMarkers(Mat inputImage, Point2f[] markerA, Point2f[] markerB)
     {
-        // 1) Gather all corners from both markers
+        // Collect all points from both markers
         var allPoints = markerA.Concat(markerB).ToList();
 
-        // 2) Compute bounding rectangle of all corners
+        // Find the minimum and maximum X and Y coordinates
         float minX = allPoints.Min(p => p.X);
         float minY = allPoints.Min(p => p.Y);
         float maxX = allPoints.Max(p => p.X);
         float maxY = allPoints.Max(p => p.Y);
 
-        // 3) Convert to integer Rect, clamp to image boundaries
-        int left = Math.Clamp((int)Math.Floor(minX), 0, inputImage.Width - 1);
-        int top = Math.Clamp((int)Math.Floor(minY), 0, inputImage.Height - 1);
-        int right = Math.Clamp((int)Math.Ceiling(maxX), 0, inputImage.Width - 1);
-        int bottom = Math.Clamp((int)Math.Ceiling(maxY), 0, inputImage.Height - 1);
+        // Identify marker bounding rectangles
+        var rectA = Cv2.BoundingRect(markerA);
+        var rectB = Cv2.BoundingRect(markerB);
 
-        int width = Math.Max(1, right - left);
-        int height = Math.Max(1, bottom - top);
+        // Dynamically determine inner cropping region excluding markers
+        int cropX = (int)Math.Min(rectA.Right, rectB.Right);
+        int cropY = (int)Math.Min(rectA.Bottom, rectB.Bottom);
+        int cropRight = (int)Math.Max(rectA.Left, rectB.Left);
+        int cropBottom = (int)Math.Max(rectA.Top, rectB.Top);
 
-        var fullRect = new Rect(left, top, width, height);
+        // Correct for inverted orientations
+        int innerX = Math.Min(cropX, cropRight);
+        int innerY = Math.Min(cropY, cropBottom);
+        int innerWidth = Math.Abs(cropRight - cropX);
+        int innerHeight = Math.Abs(cropBottom - cropY);
 
-        // 4) Optionally exclude the marker rectangles if you like
-        //    For example, remove ~10 pixels at top-left or bottom-right corners, etc.
-        //    But if there's a big skew, this won't “unskew” the region—just shrinks it.
+        // Ensure cropping area is within image boundaries
+        innerX = Math.Clamp(innerX, 0, inputImage.Width - 1);
+        innerY = Math.Clamp(innerY, 0, inputImage.Height - 1);
+        innerWidth = Math.Clamp(innerWidth, 1, inputImage.Width - innerX);
+        innerHeight = Math.Clamp(innerHeight, 1, inputImage.Height - innerY);
 
-        // 5) Crop from input
-        return new Mat(inputImage, fullRect).Clone();
+        return new Mat(inputImage, new Rect(innerX, innerY, innerWidth, innerHeight)).Clone();
     }
 
 
@@ -365,7 +384,7 @@ public static class InkAnchorHandler
                         DrawStyledLine(new PointF(x, y), new PointF(x + w, y));
 
                     if (border.Sides.HasFlag(BorderSides.Right))
-                        DrawStyledLine(new PointF(x + w, y), new PointF(x + w, y + h));
+                        DrawStyledLine(new PointF(x + w - 1, y), new PointF(x + w - 1, y + h));
 
                     if (border.Sides.HasFlag(BorderSides.Bottom))
                         DrawStyledLine(new PointF(x, y + h), new PointF(x + w, y + h));
@@ -523,16 +542,6 @@ public static class InkAnchorHandler
             """;
 
         return svg;
-    }
-
-    private static string GetSvgDashArray(BorderStyle style)
-    {
-        return style switch
-        {
-            BorderStyle.Dashed => "10,10",
-            BorderStyle.Dotted => "2,6",
-            _ => "none",
-        };
     }
 
     private static Image<Rgba32> GenerateArucoMarkerImage(int markerId, int pixelSize, int borderBits)
