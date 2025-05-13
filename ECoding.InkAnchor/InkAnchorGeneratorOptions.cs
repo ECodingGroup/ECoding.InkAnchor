@@ -32,7 +32,7 @@ public class InkAnchorGeneratorOptions
     /// <summary>
     /// The padding between the border and the marker. 
     /// </summary>
-    public int MarkerPadding { get; private set; } = 1;
+    public int MarkerPadding { get; set; } = 5;
 
     /// <summary>
     /// The box label that will be embedded. 

@@ -78,25 +78,22 @@ public static class CustomArucoDrawer
         if (baseSize <= 0)
             throw new Exception("Dictionary.MarkerSize is zero or invalid.");
 
-        // -- 1) Get the raw bits as above, using the same approach but building a 2D array --
         byte[] rowDataLocal;
         using Mat bytesList = dictionary.BytesList;
 
         if (markerId < 0 || markerId >= bytesList.Rows)
-            throw new ArgumentOutOfRangeException(nameof(markerId),
-                $"MarkerId must be between 0 and {bytesList.Rows - 1}.");
+            throw new ArgumentOutOfRangeException(nameof(markerId));
 
         using (Mat row = bytesList.Row(markerId))
         using (Mat rowSingleChannel = row.Reshape(1, 1))
         {
-            bool success = rowSingleChannel.GetArray(out byte[] rowBytes);
-            if (!success)
+            if (!rowSingleChannel.GetArray(out byte[] rowBytes))
                 throw new Exception("Failed to read dictionary row data.");
+
             rowDataLocal = rowBytes;
         }
 
         int totalBits = baseSize * baseSize;
-        // markerCells: baseSize x baseSize
         var markerCells = new byte[baseSize, baseSize];
         for (int i = 0; i < totalBits; i++)
         {
@@ -107,36 +104,30 @@ public static class CustomArucoDrawer
                 markerCells[r, c] = 1;
         }
 
-        // Add border
         int extendedSize = baseSize + (2 * borderBits);
         var markerWithBorder = new byte[extendedSize, extendedSize];
         for (int r = 0; r < baseSize; r++)
-        {
             for (int c = 0; c < baseSize; c++)
-            {
                 markerWithBorder[r + borderBits, c + borderBits] = markerCells[r, c];
-            }
-        }
 
-        // -- 2) Generate an SVG with a viewBox from 0..extendedSize --
         var sb = new StringBuilder();
-        sb.AppendLine($"<svg width=\"{sidePixels}\" height=\"{sidePixels}\" " +
-                      $"viewBox=\"0 0 {extendedSize} {extendedSize}\" xmlns=\"http://www.w3.org/2000/svg\">");
-        sb.AppendLine($"  <rect x=\"0\" y=\"0\" width=\"{extendedSize}\" height=\"{extendedSize}\" fill=\"white\"/>");
+        // Group wrapper
+        sb.AppendLine($"<g transform=\"scale({(float)sidePixels / extendedSize})\">");
 
+        // White background rect
+        sb.AppendLine($"  <rect x=\"0\" y=\"0\" width=\"{extendedSize}\" height=\"{extendedSize}\" fill=\"black\"/>");
+
+        // Draw black pixels
         for (int y = 0; y < extendedSize; y++)
         {
             for (int x = 0; x < extendedSize; x++)
             {
-                // 1 => black
                 if (markerWithBorder[y, x] == 1)
-                {
-                    sb.AppendLine($"  <rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"black\"/>");
-                }
+                    sb.AppendLine($"  <rect x=\"{x}\" y=\"{y}\" width=\"1\" height=\"1\" fill=\"white\"/>");
             }
         }
-        sb.AppendLine("</svg>");
 
+        sb.AppendLine("</g>");
         return sb.ToString();
     }
 }

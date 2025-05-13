@@ -399,14 +399,17 @@ public static class InkAnchorHandler
                     var font = SystemFonts.CreateFont(label.Font, label.FontSize);
                     float labelY = CalculateLabelY(label, labelExtraTop, boxHeight);
 
+                    // Ensure full opacity
+                    var color = label.Color.WithAlpha(1f);
+
                     var textOptions = new RichTextOptions(font)
                     {
-                        Origin = new PointF(width / 2f, labelY),
+                        Origin = new PointF((float)Math.Round(width / 2f), (float)Math.Round(labelY)),
                         HorizontalAlignment = HorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Top
                     };
 
-                    ctx.DrawText(textOptions, label.LabelText, label.Color);
+                    ctx.DrawText(textOptions, label.LabelText, color);
                 }
 
                 // Draw top-left marker
@@ -468,23 +471,35 @@ public static class InkAnchorHandler
         }
     }
 
+    public static string ToSvgHex(this Color color)
+    {
+        var rgba = color.ToPixel<Rgba32>();
+        return $"#{rgba.R:X2}{rgba.G:X2}{rgba.B:X2}";
+    }
+
     private static string GenerateSvg(InkAnchorGeneratorOptions options, byte boxId, int markerSize, int markerBorderBits, int labelExtraTop, int boxHeight, int width, int totalHeight, int markerPadding)
     {
         var svgTopLeft = GenerateArucoMarkerSvg(boxId * 2, markerSize, markerBorderBits);
         var svgBottomRight = GenerateArucoMarkerSvg(boxId * 2 + 1, markerSize, markerBorderBits);
 
-        string fillColor = options.FillColor?.ToHex() ?? "none";
+        string fillColor = options.FillColor?.ToSvgHex() ?? "none";
 
         string labelSvg = string.Empty;
         if (options.BoxLabel is { } labelOpt)
         {
-            float labelY = CalculateLabelY(labelOpt, labelExtraTop, boxHeight);
+            var extraY = 12;
+            if(labelOpt.LabelPlacement == BoxLabelPlacement.TopOutsideBox)
+            {
+                extraY *= -1;
+            }
+
+            float labelY = CalculateLabelY(labelOpt, labelExtraTop, boxHeight) + extraY;
             labelSvg = $"""
                     <text x="{width / 2}" 
                           y="{labelY}" 
                           text-anchor="middle" 
                           font-size="{labelOpt.FontSize}" 
-                          fill="{labelOpt.Color.ToHex()}" 
+                          fill="{labelOpt.Color.ToSvgHex()}" 
                           font-family="{labelOpt.Font}">
                       {EscapeXml(labelOpt.LabelText)}
                     </text>
@@ -504,7 +519,7 @@ public static class InkAnchorHandler
                 _ => "none"
             };
 
-            string stroke = border.Color.ToHex();
+            string stroke = border.Color.ToSvgHex();
             int thickness = border.Thickness;
 
             int x1 = 0, y1 = labelExtraTop;

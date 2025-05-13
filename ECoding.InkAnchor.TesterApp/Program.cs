@@ -1,4 +1,6 @@
 ﻿using ECoding.InkAnchor;
+using iText.Svg.Converter;
+using iTextSharp.text.pdf;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
@@ -13,7 +15,7 @@ using Image = SixLabors.ImageSharp.Image;
 
 /*Generate PDF With raster image*/
 
-/*
+
 Console.WriteLine("Generating PDF with signature box...");
 
 QuestPDF.Settings.License = LicenseType.Community;
@@ -23,7 +25,6 @@ var options = new InkAnchorGeneratorOptions(boxId: 2, pixelWidth: 200, pixelHeig
     FillColor = null, // transparent
     Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1, InkAnchorBorder.BorderStyle.Solid, InkAnchorBorder.BorderSides.All),
     BoxLabel = new InkAnchorLabel("Podpis poistníka", BoxLabelPlacement.BottomOutsideBox, fontSize: 14),
-    MarkerPadding = 2,
     MarkerPixelSize = 20,
     MarkerBorderBits = 1
 };
@@ -37,36 +38,98 @@ await boxImage.SaveAsPngAsync(ms);
 var imageBytes = ms.ToArray();
 
 // Define PDF document
-var pdf = Document.Create(container =>
+//var pdf = Document.Create(container =>
+//{
+//    container.Page(page =>
+//    {
+//        page.Size(PageSizes.A4);
+//        page.Margin(20);
+//        page.DefaultTextStyle(x => x.FontSize(20));
+
+//        page.Content().PaddingVertical(20).Column(column =>
+//        {
+//            column.Item().Text("This is a test document.");
+//            column.Item().Element(e => e.Extend()); // flexible space
+//        });
+
+//        page.Footer().Row(row =>
+//        {
+//            row.RelativeItem(); // Spacer on the left side
+//            row.ConstantItem(boxImage.Width)
+//               .PaddingRight(20)
+//               .PaddingBottom(20)
+//               .Image(imageBytes);
+//        });
+//    });
+//});
+//// Save PDF to file
+//pdf.GeneratePdf(@"InkAnchor.pdf");
+
+
+
+async Task<byte[]> PrintSignatureFieldAsync(byte[] pdf, bool manualSignatureField)
 {
-    container.Page(page =>
+    using var inputMs = new MemoryStream(pdf);
+    using var outputMs = new MemoryStream();
+    using var reader = new iText.Kernel.Pdf.PdfReader(inputMs);
+    using var writer = new iText.Kernel.Pdf.PdfWriter(outputMs);
+    //using var stamper = new PdfStamper(reader, outputMs);
+
+    //int page = reader.NumberOfPages;
+
+    float x = 410;
+    float y = 70;
+    float width = 200;
+    float height = 100;
+
+    var options = new InkAnchorGeneratorOptions(boxId: 1, pixelWidth: (int)width, pixelHeight: (int)height)
     {
-        page.Size(PageSizes.A4);
-        page.Margin(20);
-        page.DefaultTextStyle(x => x.FontSize(20));
+        FillColor = SixLabors.ImageSharp.Color.White,
+        Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, thickness: 1, borderStyle: InkAnchorBorder.BorderStyle.Solid),
+        BoxLabel = new InkAnchorLabel("Podpis poistníka", BoxLabelPlacement.BottomOutsideBox, fontSize: 14, font: "Helvetica", color: SixLabors.ImageSharp.Color.Black),
+        MarkerPixelSize = 17,
+        MarkerBorderBits = 1,
+    };
 
-        page.Content().PaddingVertical(20).Column(column =>
-        {
-            column.Item().Text("This is a test document.");
-            column.Item().Element(e => e.Extend()); // flexible space
-        });
+    //using var boxImage = await InkAnchorHandler.GenerateAnchorBoxImageAsync(options);
 
-        page.Footer().Row(row =>
-        {
-            row.RelativeItem(); // Spacer on the left side
-            row.ConstantItem(boxImage.Width)
-               .PaddingRight(20)
-               .PaddingBottom(20)
-               .Image(imageBytes);
-        });
-    });
-});
+    //using var imageStream = new MemoryStream();
+    //await boxImage.SaveAsPngAsync(imageStream);
+    //imageStream.Position = 0;
 
-// Save PDF to file
-pdf.GeneratePdf(@"InkAnchor.pdf");
+    //var image = iTextSharp.text.Image.GetInstance(imageStream);
+    //image.ScaleAbsolute(width, height);
+    //image.SetAbsolutePosition(x, y);
+    //var content = stamper.GetOverContent(page);
+    //content.SaveState();
+    //content.AddImage(image, inlineImage: true);
+    //content.RestoreState();
+    //stamper.Close();
+
+    //var pageDoc = reader.GetPageN(1);
+    var document = new iText.Kernel.Pdf.PdfDocument(reader, writer);
+    var lastPage = document.GetLastPage();
+    //PdfPage page = pdfDoc.GetPage(1);
+
+    var boxSVG = await InkAnchorHandler.GenerateAnchorBoxSvgAsync(options);
+    SvgConverter.DrawOnPage(boxSVG, lastPage, x, y);
+
+
+    document.Close();
+
+
+
+    return outputMs.ToArray();
+}
+
+var pdf = File.ReadAllBytes(@"C:\temp\702edee0-747a-4b2a-9ee5-98b3faee24bc\dokPdf_ba0718e8de.pdf");
+
+pdf = await PrintSignatureFieldAsync(pdf, true);
+File.WriteAllBytes(@"InkAnchor.pdf", pdf);
+
 Console.WriteLine("PDF generated: output.pdf");
 
-*/
+
 
 /*Generate PDF with SVG*/
 /*
