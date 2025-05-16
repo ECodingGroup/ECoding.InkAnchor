@@ -7,7 +7,7 @@
 
 	<!-- NuGet metadata -->
 	<PackageId>ECoding.InkAnchor</PackageId>
-	<Version>1.0.1</Version>
+	<Version>1.1.0</Version>
 	<Authors>Tomas Filip</Authors>
 	<Description>ECoding.InkAnchor provides functionality to generate and detect structured anchor boxes marked by ArUco markers, useful for extracting image regions, analyzing content fill percentage, and generating images or SVGs with labeled and customizable boxes. Built with SixLabors.ImageSharp and OpenCvSharp, it simplifies image-based content extraction and evaluation workflows in .NET 9 applications.</Description>
 	<PackageTags>ecoding;aruco;signatures</PackageTags>
@@ -16,6 +16,7 @@
 	<RepositoryType>git</RepositoryType>
 	<PackageLicenseExpression>MIT</PackageLicenseExpression>
 	<GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+	<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>
@@ -25,7 +26,7 @@
     <PackageReference Include="OpenCvSharp4_.runtime.ubuntu.20.04-x64" Version="4.10.0.20240616" />
     <PackageReference Include="QRCoder" Version="1.6.0" />
     <PackageReference Include="SixLabors.Fonts" Version="2.1.2" />
-    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.7" />
+    <PackageReference Include="SixLabors.ImageSharp" Version="3.1.8" />
     <PackageReference Include="SixLabors.ImageSharp.Drawing" Version="2.1.5" />
     <PackageReference Include="ZXing.Net" Version="0.16.10" />
     <PackageReference Include="ZXing.Net.Bindings.ImageSharp.V3" Version="0.16.17" />

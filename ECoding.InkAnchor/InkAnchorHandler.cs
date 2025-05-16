@@ -5,7 +5,6 @@ using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.Fonts;
 using OpenCvSharp;
 using OpenCvSharp.Aruco;
-using System.Text.Json;
 using static ECoding.InkAnchor.InkAnchorBorder;
 using System.Text;
 using SixLabors.ImageSharp.Advanced;
@@ -256,43 +255,238 @@ public static class InkAnchorHandler
     }
 
     /// <summary>
-    /// Crops the region between two markers (A at top-left, B at bottom-right),
-    /// excluding the bounding rectangles of the markers themselves.
+    ///  Crops the rectangle that lies BETWEEN the given TL and BR ArUco markers,
+    ///  optionally skips a safety margin (<paramref name="innerPadding"/>), paints
+    ///  the markers out (transparent or black), and auto-orients the result so
+    ///  that TL really ends up at the top-left corner of the returned Mat.
     /// </summary>
-    private static Mat CropByTwoMarkers(Mat inputImage, Point2f[] markerA, Point2f[] markerB)
+    private static Mat CropByTwoMarkers(
+        Mat inputImage,
+        Point2f[] markerTL,              // must be the SMALLER-ID marker
+        Point2f[] markerBR,              // must be the LARGER-ID marker
+        int innerPadding = 2,
+        bool transparent = true,
+        bool autoOrient = true)
     {
-        // Collect all points from both markers
-        var allPoints = markerA.Concat(markerB).ToList();
+        Rect tlRect = Cv2.BoundingRect(markerTL);
+        Rect brRect = Cv2.BoundingRect(markerBR);
 
-        // Find the minimum and maximum X and Y coordinates
-        float minX = allPoints.Min(p => p.X);
-        float minY = allPoints.Min(p => p.Y);
-        float maxX = allPoints.Max(p => p.X);
-        float maxY = allPoints.Max(p => p.Y);
+        int left = tlRect.Right + innerPadding;
+        int top = tlRect.Bottom + innerPadding;
+        int right = brRect.Left - innerPadding;
+        int bottom = brRect.Top - innerPadding;
 
-        // Identify marker bounding rectangles
-        var rectA = Cv2.BoundingRect(markerA);
-        var rectB = Cv2.BoundingRect(markerB);
+        // clamp & ensure non-empty
+        left = Math.Clamp(left, 0, inputImage.Width - 2);
+        top = Math.Clamp(top, 0, inputImage.Height - 2);
+        right = Math.Clamp(right, left + 1, inputImage.Width - 1);
+        bottom = Math.Clamp(bottom, top + 1, inputImage.Height - 1);
 
-        // Dynamically determine inner cropping region excluding markers
-        int cropX = (int)Math.Min(rectA.Right, rectB.Right);
-        int cropY = (int)Math.Min(rectA.Bottom, rectB.Bottom);
-        int cropRight = (int)Math.Max(rectA.Left, rectB.Left);
-        int cropBottom = (int)Math.Max(rectA.Top, rectB.Top);
+        var inner = new Rect(left, top, right - left, bottom - top);
+        var roi = new Mat(inputImage, inner).Clone();
 
-        // Correct for inverted orientations
-        int innerX = Math.Min(cropX, cropRight);
-        int innerY = Math.Min(cropY, cropBottom);
-        int innerWidth = Math.Abs(cropRight - cropX);
-        int innerHeight = Math.Abs(cropBottom - cropY);
+        Scalar hole = transparent ? new Scalar(0, 0, 0, 0) : Scalar.Black;
 
-        // Ensure cropping area is within image boundaries
-        innerX = Math.Clamp(innerX, 0, inputImage.Width - 1);
-        innerY = Math.Clamp(innerY, 0, inputImage.Height - 1);
-        innerWidth = Math.Clamp(innerWidth, 1, inputImage.Width - innerX);
-        innerHeight = Math.Clamp(innerHeight, 1, inputImage.Height - innerY);
+        void ZapMarker(Point2f[] marker)
+        {
+            Rect r = Cv2.BoundingRect(marker);
+            r.X = r.X - inner.X;           // ROI-local coordinates
+            r.Y = r.Y - inner.Y;
+            r.Width = Math.Min(r.Width, roi.Width - r.X);
+            r.Height = Math.Min(r.Height, roi.Height - r.Y);
+            Cv2.Rectangle(roi, r, hole, thickness: -1);
+        }
 
-        return new Mat(inputImage, new Rect(innerX, innerY, innerWidth, innerHeight)).Clone();
+        ZapMarker(markerTL);
+        ZapMarker(markerBR);
+
+        if (autoOrient)
+        {
+            static Point2f C(Point2f[] pts) =>
+                new((float)pts.Average(p => p.X), (float)pts.Average(p => p.Y));
+
+            float dx = C(markerBR).X - C(markerTL).X;
+            float dy = C(markerBR).Y - C(markerTL).Y;
+
+            if (dx > 0 && dy > 0) Cv2.Rotate(roi, roi, RotateFlags.Rotate180);
+        }
+
+        return roi;
+    }
+
+    /// <summary>
+    /// Removes near-white pixels (or transparent ones), finds the smallest
+    /// rectangle that still contains ink, crops to it, and returns the result.
+    /// Foreground pixels are painted solid black; background is transparent.
+    ///
+    /// • <paramref name="whiteThreshold"/>:   0-255.  Any pixel whose
+    ///   perceived luminance **and** alpha are both above this value is treated
+    ///   as background.
+    /// • Throws <see cref="ArgumentException"/> if the source image is null or empty.
+    /// • Returns <c>new Image&lt;Rgba32&gt;(1,1)</c> if *all* pixels were blank.
+    /// </summary>
+    public static Image<Rgba32> TrimAndBinarise(
+        Image<Rgba32> src,
+        byte whiteLum = 240,
+        byte whiteVar = 10,
+        int minBlob = 50,
+        int keepTopK = 1,
+        int smoothR = 1,
+        double preBlurSigma = 1.2)
+    {
+        if (src is null || src.Width == 0 || src.Height == 0)
+            throw new ArgumentException("Input image is null or empty.", nameof(src));
+
+        int w = src.Width, h = src.Height;
+
+        // ───── A) ImageSharp → OpenCV Mat (BGRA) ─────────────────────────
+        using var mat = new Mat(h, w, MatType.CV_8UC4);
+        src.ProcessPixelRows(ac =>
+        {
+            for (int y = 0; y < h; y++)
+            {
+                var span = ac.GetRowSpan(y);
+                unsafe
+                {
+                    byte* dst = (byte*)mat.Ptr(y);
+                    for (int x = 0; x < w; x++)
+                    {
+                        var p = span[x];           // RGBA
+                        dst[x * 4 + 0] = p.B;
+                        dst[x * 4 + 1] = p.G;
+                        dst[x * 4 + 2] = p.R;
+                        dst[x * 4 + 3] = p.A;
+                    }
+                }
+            }
+        });
+
+        if (preBlurSigma > 0.0)
+        {
+            int k = (int)(preBlurSigma * 3) * 2 + 1;
+            Cv2.GaussianBlur(mat, mat, new OpenCvSharp.Size(k, k), preBlurSigma);
+        }
+
+        // ───── B) binary mask (255 = ink) ────────────────────────────────
+        using var mask = new Mat(h, w, MatType.CV_8UC1, Scalar.Black);
+
+        unsafe
+        {
+            byte* mPtr = (byte*)mask.DataPointer;
+            for (int y = 0; y < h; y++)
+            {
+                byte* sRow = (byte*)mat.Ptr(y);
+                for (int x = 0; x < w; x++)
+                {
+                    byte b = sRow[x * 4 + 0];
+                    byte g = sRow[x * 4 + 1];
+                    byte r = sRow[x * 4 + 2];
+                    byte a = sRow[x * 4 + 3];
+                    if (a == 0) continue;
+
+                    int lum = (int)(0.299 * r + 0.587 * g + 0.114 * b);
+                    int var = Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b));
+
+                    if (lum < whiteLum || var > whiteVar)
+                        mPtr[y * w + x] = 255;
+                }
+            }
+        }
+
+        // ───── C) closing + opening for smooth edges ────────────────────
+        if (smoothR > 0)
+        {
+            var ker = Cv2.GetStructuringElement(MorphShapes.Cross, new OpenCvSharp.Size(3, 3));
+            Cv2.MorphologyEx(mask, mask, MorphTypes.Close, ker);
+            Cv2.MorphologyEx(mask, mask, MorphTypes.Open, ker);
+        }
+
+        // ───── D) keep K largest blobs ──────────────────────────────────
+        Mat labels = new(); Mat stats = new(); Mat cent = new();
+        Cv2.ConnectedComponentsWithStats(mask, labels, stats, cent,
+                                         PixelConnectivity.Connectivity4);
+
+        var areas = new List<(int Id, int Area, int X, int Y, int W, int H)>();
+        for (int i = 1; i < stats.Rows; i++)              // 0 = background
+        {
+            int area = stats.Get<int>(i, (int)ConnectedComponentsTypes.Area);
+            if (area < minBlob) continue;
+
+            areas.Add((i, area,
+                       stats.Get<int>(i, 0), stats.Get<int>(i, 1),
+                       stats.Get<int>(i, 2), stats.Get<int>(i, 3)));
+        }
+
+        if (areas.Count == 0)
+            return new Image<Rgba32>(1, 1);
+
+        areas.Sort((a, b) => b.Area.CompareTo(a.Area));
+        if (keepTopK > 0 && areas.Count > keepTopK)
+            areas.RemoveRange(keepTopK, areas.Count - keepTopK);
+
+        var keepIds = new HashSet<int>();
+        int minX = w, minY = h, maxX = 0, maxY = 0;
+        foreach (var a in areas)
+        {
+            keepIds.Add(a.Id);
+            minX = Math.Min(minX, a.X);
+            minY = Math.Min(minY, a.Y);
+            maxX = Math.Max(maxX, a.X + a.W - 1);
+            maxY = Math.Max(maxY, a.Y + a.H - 1);
+        }
+
+        unsafe
+        {
+            int* lbl = (int*)labels.DataPointer;
+            byte* m = (byte*)mask.DataPointer;
+            for (int i = 0; i < w * h; i++)
+                if (!keepIds.Contains(lbl[i]))
+                    m[i] = 0;
+        }
+
+        // ───── E) build cropped BGRA mat with ink = black ──────────────
+        int cw = maxX - minX + 1, ch = maxY - minY + 1;
+        using var outMat = new Mat(ch, cw, MatType.CV_8UC4, new(0, 0, 0, 0));
+
+        unsafe
+        {
+            for (int y = 0; y < ch; y++)
+            {
+                byte* srcMask = (byte*)mask.Ptr(y + minY);
+                byte* dst = (byte*)outMat.Ptr(y);
+                for (int x = 0; x < cw; x++)
+                {
+                    if (srcMask[minX + x] != 0)
+                    {
+                        int off = x * 4;
+                        dst[off + 3] = 255;               // alpha
+                        // B, G, R already 0 = black
+                    }
+                }
+            }
+        }
+
+        // ───── F) Mat → ImageSharp --------------------------------------
+        var dstImg = new Image<Rgba32>(cw, ch);
+        dstImg.ProcessPixelRows(ac =>
+        {
+            for (int y = 0; y < ch; y++)
+            {
+                var span = ac.GetRowSpan(y);
+                unsafe
+                {
+                    byte* srcRow = (byte*)outMat.Ptr(y);
+                    for (int x = 0; x < cw; x++)
+                        span[x] = new Rgba32(
+                                      srcRow[x * 4 + 2],
+                                      srcRow[x * 4 + 1],
+                                      srcRow[x * 4 + 0],
+                                      srcRow[x * 4 + 3]);
+                }
+            }
+        });
+
+        return dstImg;
     }
 
 
