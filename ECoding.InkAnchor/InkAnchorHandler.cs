@@ -308,7 +308,7 @@ public static class InkAnchorHandler
             float dx = C(markerBR).X - C(markerTL).X;
             float dy = C(markerBR).Y - C(markerTL).Y;
 
-            if (dx > 0 && dy > 0) Cv2.Rotate(roi, roi, RotateFlags.Rotate180);
+            if (dx < 0 && dy < 0) Cv2.Rotate(roi, roi, RotateFlags.Rotate180);
         }
 
         return roi;

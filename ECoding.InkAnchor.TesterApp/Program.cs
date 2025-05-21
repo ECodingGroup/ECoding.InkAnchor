@@ -303,7 +303,7 @@ Console.WriteLine(InkAnchorHandler.GetFilledAreaPercentage(inputImage));
 
 
 
-
+/*
 string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\anchor_box_1.png";
 string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
 
@@ -338,6 +338,70 @@ try
     string outPath = Path.Combine(outputFolder, outFileName);
     binarizedCroppedImage.SaveAsPng(outPath);
     Console.WriteLine($"  -> Saved binarized box to '{outPath}'");
+}
+catch (Exception ex)
+{
+    Console.WriteLine("Error while processing the image:");
+    Console.WriteLine(ex.Message);
+}
+*/
+
+/*Test extraction and trimming*/
+
+
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0008_page-0001.jpg";
+string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
+
+if (!File.Exists(inputImagePath))
+{
+    Console.WriteLine($"Error: Cannot find input image at '{inputImagePath}'");
+    return;
+}
+
+if (!Directory.Exists(outputFolder))
+{
+    Console.WriteLine($"Warning: Output folder '{outputFolder}' does not exist. Creating it...");
+    Directory.CreateDirectory(outputFolder);
+}
+
+try
+{
+    // 2) Load the input image (ImageSharp)
+    using Image<Rgba32> inputImage = Image.Load<Rgba32>(inputImagePath);
+
+    // 3) Extract all anchor boxes => returns List<(int BoxId, Image<Rgba32> Cropped)>
+    var anchorBoxes = InkAnchorHandler.GetAnchorBoxesContentImage(inputImage);
+
+    // 4) Save each extracted box image
+    if (anchorBoxes.Count == 0)
+    {
+        Console.WriteLine("No anchor boxes found in the image.");
+    }
+    else
+    {
+        Console.WriteLine($"Found {anchorBoxes.Count} anchor box(es).");
+
+        foreach (var (boxId, croppedImg) in anchorBoxes)
+        {
+            // e.g. "anchor_box_0.png", "anchor_box_1.png", etc.
+            string outFileName = $"anchor_box_{boxId}.png";
+            string outPath = Path.Combine(outputFolder, outFileName);
+
+
+            var binarizedCroppedImage = InkAnchorHandler.TrimAndBinarise(
+                   croppedImg,
+                   whiteLum: 240,   // looser – keeps faint ink
+                   whiteVar: 10,
+                   minBlob: 50,
+                   keepTopK: 1,
+                   smoothR: 0,     // no closing/opening
+                   preBlurSigma: 1);  // still knocks out specks;
+
+            
+            binarizedCroppedImage.SaveAsPng(outPath);
+            Console.WriteLine($"  -> Saved binarized box to '{outPath}'");
+        }
+    }
 }
 catch (Exception ex)
 {
