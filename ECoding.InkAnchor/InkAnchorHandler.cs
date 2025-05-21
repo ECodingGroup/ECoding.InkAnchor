@@ -314,179 +314,117 @@ public static class InkAnchorHandler
         return roi;
     }
 
-    /// <summary>
-    /// Removes near-white pixels (or transparent ones), finds the smallest
-    /// rectangle that still contains ink, crops to it, and returns the result.
-    /// Foreground pixels are painted solid black; background is transparent.
-    ///
-    /// • <paramref name="whiteThreshold"/>:   0-255.  Any pixel whose
-    ///   perceived luminance **and** alpha are both above this value is treated
-    ///   as background.
-    /// • Throws <see cref="ArgumentException"/> if the source image is null or empty.
-    /// • Returns <c>new Image&lt;Rgba32&gt;(1,1)</c> if *all* pixels were blank.
-    /// </summary>
+
     public static Image<Rgba32> TrimAndBinarise(
         Image<Rgba32> src,
-        byte whiteLum = 240,
-        byte whiteVar = 10,
-        int minBlob = 50,
-        int keepTopK = 1,
-        int smoothR = 1,
-        double preBlurSigma = 1.2)
+        int blurSize = 3,
+        double blurSigma = 1.0,
+        AdaptiveThresholdTypes adaptiveMethod = AdaptiveThresholdTypes.GaussianC,
+        ThresholdTypes thresholdType = ThresholdTypes.Binary,
+        int blockSize = 25,
+        double C = 10,
+        int targetWidth = 300,
+        int targetHeight = 150
+    )
     {
         if (src is null || src.Width == 0 || src.Height == 0)
             throw new ArgumentException("Input image is null or empty.", nameof(src));
 
-        int w = src.Width, h = src.Height;
-
-        // ───── A) ImageSharp → OpenCV Mat (BGRA) ─────────────────────────
-        using var mat = new Mat(h, w, MatType.CV_8UC4);
-        src.ProcessPixelRows(ac =>
+        // Step 1: Convert ImageSharp image to OpenCv Mat (grayscale)
+        using Mat matSrc = new(src.Height, src.Width, MatType.CV_8UC4);
+        src.ProcessPixelRows(pa =>
         {
-            for (int y = 0; y < h; y++)
+            for (int y = 0; y < src.Height; y++)
             {
-                var span = ac.GetRowSpan(y);
-                unsafe
+                Span<Rgba32> row = pa.GetRowSpan(y);
+                for (int x = 0; x < src.Width; x++)
                 {
-                    byte* dst = (byte*)mat.Ptr(y);
-                    for (int x = 0; x < w; x++)
-                    {
-                        var p = span[x];           // RGBA
-                        dst[x * 4 + 0] = p.B;
-                        dst[x * 4 + 1] = p.G;
-                        dst[x * 4 + 2] = p.R;
-                        dst[x * 4 + 3] = p.A;
-                    }
+                    var px = row[x];
+                    matSrc.Set(y, x, new Vec4b(px.B, px.G, px.R, px.A));
                 }
             }
         });
 
-        if (preBlurSigma > 0.0)
-        {
-            int k = (int)(preBlurSigma * 3) * 2 + 1;
-            Cv2.GaussianBlur(mat, mat, new OpenCvSharp.Size(k, k), preBlurSigma);
-        }
+        Mat gray = new();
+        Cv2.CvtColor(matSrc, gray, ColorConversionCodes.BGRA2GRAY);
 
-        // ───── B) binary mask (255 = ink) ────────────────────────────────
-        using var mask = new Mat(h, w, MatType.CV_8UC1, Scalar.Black);
+        // Step 2: Gaussian blur (optional but recommended)
+        if (blurSize > 0)
+            Cv2.GaussianBlur(gray, gray, new OpenCvSharp.Size(blurSize, blurSize), blurSigma);
 
-        unsafe
+        // Step 3: Adaptive Thresholding
+        Mat thresh = new();
+        Cv2.AdaptiveThreshold(gray, thresh, 255, adaptiveMethod, thresholdType, blockSize, C);
+
+        // Step 4: Crop whitespace
+        var boundingRect = GetTightBoundingBox(thresh);
+        //var contours = Cv2.FindContoursAsArray(thresh, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
+        //var boundingRect = contours.Select(Cv2.BoundingRect).OrderByDescending(r => r.Width * r.Height).FirstOrDefault();
+
+        if (boundingRect.Width == 0 || boundingRect.Height == 0)
+            return new Image<Rgba32>(targetWidth, targetHeight); // empty fallback
+
+        Mat cropped = new(thresh, boundingRect);
+
+        // Step 5: Resize and center signature
+        Mat resized = new(targetHeight, targetWidth, MatType.CV_8UC1, Scalar.White);
+        float scale = Math.Min((float)targetWidth / boundingRect.Width, (float)targetHeight / boundingRect.Height);
+
+        Mat resizedSig = new();
+        Cv2.Resize(cropped, resizedSig, new OpenCvSharp.Size(), scale, scale, InterpolationFlags.Area);
+
+        int offsetX = (targetWidth - resizedSig.Width) / 2;
+        int offsetY = (targetHeight - resizedSig.Height) / 2;
+        resizedSig.CopyTo(new Mat(resized, new Rect(offsetX, offsetY, resizedSig.Width, resizedSig.Height)));
+
+        // Convert back to ImageSharp
+        Image<Rgba32> result = new(targetWidth, targetHeight);
+        result.ProcessPixelRows(pa =>
         {
-            byte* mPtr = (byte*)mask.DataPointer;
-            for (int y = 0; y < h; y++)
+            for (int y = 0; y < targetHeight; y++)
             {
-                byte* sRow = (byte*)mat.Ptr(y);
-                for (int x = 0; x < w; x++)
+                Span<Rgba32> row = pa.GetRowSpan(y);
+                for (int x = 0; x < targetWidth; x++)
                 {
-                    byte b = sRow[x * 4 + 0];
-                    byte g = sRow[x * 4 + 1];
-                    byte r = sRow[x * 4 + 2];
-                    byte a = sRow[x * 4 + 3];
-                    if (a == 0) continue;
-
-                    int lum = (int)(0.299 * r + 0.587 * g + 0.114 * b);
-                    int var = Math.Max(r, Math.Max(g, b)) - Math.Min(r, Math.Min(g, b));
-
-                    if (lum < whiteLum || var > whiteVar)
-                        mPtr[y * w + x] = 255;
-                }
-            }
-        }
-
-        // ───── C) closing + opening for smooth edges ────────────────────
-        if (smoothR > 0)
-        {
-            var ker = Cv2.GetStructuringElement(MorphShapes.Cross, new OpenCvSharp.Size(3, 3));
-            Cv2.MorphologyEx(mask, mask, MorphTypes.Close, ker);
-            Cv2.MorphologyEx(mask, mask, MorphTypes.Open, ker);
-        }
-
-        // ───── D) keep K largest blobs ──────────────────────────────────
-        Mat labels = new(); Mat stats = new(); Mat cent = new();
-        Cv2.ConnectedComponentsWithStats(mask, labels, stats, cent,
-                                         PixelConnectivity.Connectivity4);
-
-        var areas = new List<(int Id, int Area, int X, int Y, int W, int H)>();
-        for (int i = 1; i < stats.Rows; i++)              // 0 = background
-        {
-            int area = stats.Get<int>(i, (int)ConnectedComponentsTypes.Area);
-            if (area < minBlob) continue;
-
-            areas.Add((i, area,
-                       stats.Get<int>(i, 0), stats.Get<int>(i, 1),
-                       stats.Get<int>(i, 2), stats.Get<int>(i, 3)));
-        }
-
-        if (areas.Count == 0)
-            return new Image<Rgba32>(1, 1);
-
-        areas.Sort((a, b) => b.Area.CompareTo(a.Area));
-        if (keepTopK > 0 && areas.Count > keepTopK)
-            areas.RemoveRange(keepTopK, areas.Count - keepTopK);
-
-        var keepIds = new HashSet<int>();
-        int minX = w, minY = h, maxX = 0, maxY = 0;
-        foreach (var a in areas)
-        {
-            keepIds.Add(a.Id);
-            minX = Math.Min(minX, a.X);
-            minY = Math.Min(minY, a.Y);
-            maxX = Math.Max(maxX, a.X + a.W - 1);
-            maxY = Math.Max(maxY, a.Y + a.H - 1);
-        }
-
-        unsafe
-        {
-            int* lbl = (int*)labels.DataPointer;
-            byte* m = (byte*)mask.DataPointer;
-            for (int i = 0; i < w * h; i++)
-                if (!keepIds.Contains(lbl[i]))
-                    m[i] = 0;
-        }
-
-        // ───── E) build cropped BGRA mat with ink = black ──────────────
-        int cw = maxX - minX + 1, ch = maxY - minY + 1;
-        using var outMat = new Mat(ch, cw, MatType.CV_8UC4, new(0, 0, 0, 0));
-
-        unsafe
-        {
-            for (int y = 0; y < ch; y++)
-            {
-                byte* srcMask = (byte*)mask.Ptr(y + minY);
-                byte* dst = (byte*)outMat.Ptr(y);
-                for (int x = 0; x < cw; x++)
-                {
-                    if (srcMask[minX + x] != 0)
-                    {
-                        int off = x * 4;
-                        dst[off + 3] = 255;               // alpha
-                        // B, G, R already 0 = black
-                    }
-                }
-            }
-        }
-
-        // ───── F) Mat → ImageSharp --------------------------------------
-        var dstImg = new Image<Rgba32>(cw, ch);
-        dstImg.ProcessPixelRows(ac =>
-        {
-            for (int y = 0; y < ch; y++)
-            {
-                var span = ac.GetRowSpan(y);
-                unsafe
-                {
-                    byte* srcRow = (byte*)outMat.Ptr(y);
-                    for (int x = 0; x < cw; x++)
-                        span[x] = new Rgba32(
-                                      srcRow[x * 4 + 2],
-                                      srcRow[x * 4 + 1],
-                                      srcRow[x * 4 + 0],
-                                      srcRow[x * 4 + 3]);
+                    byte val = resized.At<byte>(y, x);
+                    row[x] = new Rgba32(val, val, val, 255);
                 }
             }
         });
 
-        return dstImg;
+        // Dispose temporary mats
+        gray.Dispose();
+        thresh.Dispose();
+        cropped.Dispose();
+        resized.Dispose();
+        resizedSig.Dispose();
+
+        return result;
+    }
+
+    private static Rect GetTightBoundingBox(Mat binaryMat)
+    {
+        int minX = binaryMat.Width, maxX = 0;
+        int minY = binaryMat.Height, maxY = 0;
+
+        for (int y = 0; y < binaryMat.Height; y++)
+        {
+            for (int x = 0; x < binaryMat.Width; x++)
+            {
+                if (binaryMat.At<byte>(y, x) == 0) // black pixel
+                {
+                    minX = Math.Min(minX, x);
+                    maxX = Math.Max(maxX, x);
+                    minY = Math.Min(minY, y);
+                    maxY = Math.Max(maxY, y);
+                }
+            }
+        }
+
+        if (minX >= maxX || minY >= maxY)
+            return new Rect(0, 0, binaryMat.Width, binaryMat.Height);
+
+        return new Rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
     }
 
 

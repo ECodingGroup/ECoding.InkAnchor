@@ -1,6 +1,7 @@
 ﻿using ECoding.InkAnchor;
 using iText.Svg.Converter;
 using iTextSharp.text.pdf;
+using OpenCvSharp;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
@@ -383,21 +384,17 @@ try
 
         foreach (var (boxId, croppedImg) in anchorBoxes)
         {
-            // e.g. "anchor_box_0.png", "anchor_box_1.png", etc.
             string outFileName = $"anchor_box_{boxId}.png";
             string outPath = Path.Combine(outputFolder, outFileName);
 
+            var binarizedCroppedImage = InkAnchorHandler.TrimAndBinarise(croppedImg,
+                blurSize: 3,
+                blurSigma: 0.8,
+                adaptiveMethod: AdaptiveThresholdTypes.GaussianC,
+                thresholdType: ThresholdTypes.Binary,
+                blockSize: 11,
+                C: 3);
 
-            var binarizedCroppedImage = InkAnchorHandler.TrimAndBinarise(
-                   croppedImg,
-                   whiteLum: 240,   // looser – keeps faint ink
-                   whiteVar: 10,
-                   minBlob: 50,
-                   keepTopK: 1,
-                   smoothR: 0,     // no closing/opening
-                   preBlurSigma: 1);  // still knocks out specks;
-
-            
             binarizedCroppedImage.SaveAsPng(outPath);
             Console.WriteLine($"  -> Saved binarized box to '{outPath}'");
         }
