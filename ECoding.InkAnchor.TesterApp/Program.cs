@@ -350,7 +350,7 @@ catch (Exception ex)
 /*Test extraction and trimming*/
 
 
-string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0008_page-0001.jpg";
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0009_page-0001.jpg";
 string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
 
 if (!File.Exists(inputImagePath))
@@ -387,13 +387,7 @@ try
             string outFileName = $"anchor_box_{boxId}.png";
             string outPath = Path.Combine(outputFolder, outFileName);
 
-            var binarizedCroppedImage = InkAnchorHandler.TrimAndBinarise(croppedImg,
-                blurSize: 3,
-                blurSigma: 0.8,
-                adaptiveMethod: AdaptiveThresholdTypes.GaussianC,
-                thresholdType: ThresholdTypes.Binary,
-                blockSize: 11,
-                C: 3);
+            var binarizedCroppedImage = InkAnchorHandler.TrimBasedOnBinarisedImage(croppedImg, padding: 10);
 
             binarizedCroppedImage.SaveAsPng(outPath);
             Console.WriteLine($"  -> Saved binarized box to '{outPath}'");

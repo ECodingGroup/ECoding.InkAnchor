@@ -315,116 +315,69 @@ public static class InkAnchorHandler
     }
 
 
-    public static Image<Rgba32> TrimAndBinarise(
-        Image<Rgba32> src,
-        int blurSize = 3,
-        double blurSigma = 1.0,
-        AdaptiveThresholdTypes adaptiveMethod = AdaptiveThresholdTypes.GaussianC,
-        ThresholdTypes thresholdType = ThresholdTypes.Binary,
-        int blockSize = 25,
-        double C = 10,
-        int targetWidth = 300,
-        int targetHeight = 150
-    )
+    /// <summary>
+    /// Crops an ImageSharp image to the tight bounding box of the signature,
+    /// using adaptive thresholding for robust foreground detection.
+    /// The returned image is a COLOR crop of the original, not thresholded.
+    /// </summary>
+    public static Image<Rgba32> TrimBasedOnBinarisedImage(
+    Image<Rgba32> src,
+    int minBlue = 60,
+    int minIntensity = 30,
+    int padding = 10 // <-- new parameter
+)
     {
         if (src is null || src.Width == 0 || src.Height == 0)
             throw new ArgumentException("Input image is null or empty.", nameof(src));
 
-        // Step 1: Convert ImageSharp image to OpenCv Mat (grayscale)
-        using Mat matSrc = new(src.Height, src.Width, MatType.CV_8UC4);
-        src.ProcessPixelRows(pa =>
-        {
-            for (int y = 0; y < src.Height; y++)
+        int w = src.Width;
+        int h = src.Height;
+        using var matMask = new Mat(h, w, MatType.CV_8UC1, Scalar.All(0));
+
+        // Build color mask for blue/black ink
+        src.ProcessPixelRows(pa => {
+            for (int y = 0; y < h; y++)
             {
                 Span<Rgba32> row = pa.GetRowSpan(y);
-                for (int x = 0; x < src.Width; x++)
+                unsafe
                 {
-                    var px = row[x];
-                    matSrc.Set(y, x, new Vec4b(px.B, px.G, px.R, px.A));
+                    byte* dst = (byte*)matMask.Ptr(y);
+                    for (int x = 0; x < w; x++)
+                    {
+                        var px = row[x];
+                        if (
+                            (px.B > minBlue && px.B > px.R + 15 && px.B > px.G + 15) ||
+                            (px.R < minIntensity && px.G < minIntensity && px.B < minIntensity)
+                        )
+                            dst[x] = 255;
+                    }
                 }
             }
         });
 
-        Mat gray = new();
-        Cv2.CvtColor(matSrc, gray, ColorConversionCodes.BGRA2GRAY);
+        using var nonZero = new Mat();
+        Cv2.FindNonZero(matMask, nonZero);
+        if (nonZero.Empty())
+            return new Image<Rgba32>(padding * 2 + 1, padding * 2 + 1);
 
-        // Step 2: Gaussian blur (optional but recommended)
-        if (blurSize > 0)
-            Cv2.GaussianBlur(gray, gray, new OpenCvSharp.Size(blurSize, blurSize), blurSigma);
+        var points = new OpenCvSharp.Point[nonZero.Rows];
+        for (int i = 0; i < nonZero.Rows; i++)
+            points[i] = nonZero.Get<OpenCvSharp.Point>(i);
+        var boundingRect = Cv2.BoundingRect(points);
 
-        // Step 3: Adaptive Thresholding
-        Mat thresh = new();
-        Cv2.AdaptiveThreshold(gray, thresh, 255, adaptiveMethod, thresholdType, blockSize, C);
+        // 1. Crop the signature tightly (no padding yet)
+        var cropRect = new SixLabors.ImageSharp.Rectangle(boundingRect.X, boundingRect.Y, boundingRect.Width, boundingRect.Height);
+        using var cropped = src.Clone(ctx => ctx.Crop(cropRect));
 
-        // Step 4: Crop whitespace
-        var boundingRect = GetTightBoundingBox(thresh);
-        //var contours = Cv2.FindContoursAsArray(thresh, RetrievalModes.External, ContourApproximationModes.ApproxSimple);
-        //var boundingRect = contours.Select(Cv2.BoundingRect).OrderByDescending(r => r.Width * r.Height).FirstOrDefault();
+        // 2. Create new blank image with desired border (padding on all sides)
+        int outW = cropped.Width + padding * 2;
+        int outH = cropped.Height + padding * 2;
+        var canvas = new Image<Rgba32>(outW, outH, Color.White);
 
-        if (boundingRect.Width == 0 || boundingRect.Height == 0)
-            return new Image<Rgba32>(targetWidth, targetHeight); // empty fallback
+        // 3. Paste the cropped signature centered (with padding)
+        canvas.Mutate(ctx => ctx.DrawImage(cropped, new SixLabors.ImageSharp.Point(padding, padding), 1));
 
-        Mat cropped = new(thresh, boundingRect);
-
-        // Step 5: Resize and center signature
-        Mat resized = new(targetHeight, targetWidth, MatType.CV_8UC1, Scalar.White);
-        float scale = Math.Min((float)targetWidth / boundingRect.Width, (float)targetHeight / boundingRect.Height);
-
-        Mat resizedSig = new();
-        Cv2.Resize(cropped, resizedSig, new OpenCvSharp.Size(), scale, scale, InterpolationFlags.Area);
-
-        int offsetX = (targetWidth - resizedSig.Width) / 2;
-        int offsetY = (targetHeight - resizedSig.Height) / 2;
-        resizedSig.CopyTo(new Mat(resized, new Rect(offsetX, offsetY, resizedSig.Width, resizedSig.Height)));
-
-        // Convert back to ImageSharp
-        Image<Rgba32> result = new(targetWidth, targetHeight);
-        result.ProcessPixelRows(pa =>
-        {
-            for (int y = 0; y < targetHeight; y++)
-            {
-                Span<Rgba32> row = pa.GetRowSpan(y);
-                for (int x = 0; x < targetWidth; x++)
-                {
-                    byte val = resized.At<byte>(y, x);
-                    row[x] = new Rgba32(val, val, val, 255);
-                }
-            }
-        });
-
-        // Dispose temporary mats
-        gray.Dispose();
-        thresh.Dispose();
-        cropped.Dispose();
-        resized.Dispose();
-        resizedSig.Dispose();
-
-        return result;
-    }
-
-    private static Rect GetTightBoundingBox(Mat binaryMat)
-    {
-        int minX = binaryMat.Width, maxX = 0;
-        int minY = binaryMat.Height, maxY = 0;
-
-        for (int y = 0; y < binaryMat.Height; y++)
-        {
-            for (int x = 0; x < binaryMat.Width; x++)
-            {
-                if (binaryMat.At<byte>(y, x) == 0) // black pixel
-                {
-                    minX = Math.Min(minX, x);
-                    maxX = Math.Max(maxX, x);
-                    minY = Math.Min(minY, y);
-                    maxY = Math.Max(maxY, y);
-                }
-            }
-        }
-
-        if (minX >= maxX || minY >= maxY)
-            return new Rect(0, 0, binaryMat.Width, binaryMat.Height);
-
-        return new Rect(minX, minY, maxX - minX + 1, maxY - minY + 1);
+        return canvas;
     }
 
 
