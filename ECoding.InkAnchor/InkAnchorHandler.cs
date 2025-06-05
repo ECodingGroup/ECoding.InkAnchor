@@ -3,8 +3,6 @@ using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
 using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.Fonts;
-using OpenCvSharp;
-using OpenCvSharp.Aruco;
 using static ECoding.InkAnchor.InkAnchorBorder;
 using System.Text;
 using SixLabors.ImageSharp.Advanced;
@@ -15,396 +13,111 @@ public static class InkAnchorHandler
 {
     public static async Task<Image<Rgba32>> GenerateAnchorBoxImageAsync(InkAnchorGeneratorOptions options)
     {
-        var generationResult = await GenerateIngAnchorBoxAsync(options, generateSvg: false);
-        return generationResult.image!;
+        var (img, _) = await GenerateIngAnchorBoxAsync(options, generateSvg: false);
+        return img!;
     }
 
     public static async Task<string> GenerateAnchorBoxSvgAsync(InkAnchorGeneratorOptions options)
     {
-        var generationResult = await GenerateIngAnchorBoxAsync(options, generateSvg: true);
-        return generationResult.svg!;
+        var (_, svg) = await GenerateIngAnchorBoxAsync(options, generateSvg: true);
+        return svg!;
     }
 
     public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage)
-    {
-        using var mat = ToMat(inputImage);
+    => ExtractAllAnchorBoxes(inputImage);
 
-        // 2) Detect & extract boxes (boxId, Mat Cropped) 
-        var allBoxes = ExtractAllAnchorBoxes(mat);
-
-        // 3) Convert each cropped Mat => Image<Rgba32>
-        var results = new List<(int BoxId, Image<Rgba32>)>();
-
-        foreach (var (boxId, croppedMat) in allBoxes)
-        {
-            var croppedImg = croppedMat.ToImageSharpRgba32();
-            results.Add((boxId, croppedImg));
-        }
-
-        return results;
-    }
-
-    /// <summary>
-    /// Evaluates the filled area of an ImageSharp image as a fraction (0.xxx).
-    /// A pixel is considered "filled" if its computed brightness is below the given threshold.
-    /// </summary>
-    /// <param name="image">
-    /// An ImageSharp Image of type Rgba32 to analyze.
-    /// </param>
-    /// <param name="brightnessThreshold">
-    /// The brightness threshold (0-255) below which a pixel is considered "filled".
-    /// Default value is 240, meaning pixels with brightness less than 240 are considered filled.
-    /// </param>
-    /// <returns>
-    /// A double representing the fraction of the image that is filled.
-    /// For example, a return value of 0.05 means 5% of the image pixels are considered filled.
-    /// </returns>
     public static double GetFilledAreaPercentage(Image<Rgba32> image, byte brightnessThreshold = 240)
     {
-        int width = image.Width;
-        int height = image.Height;
-        int totalPixels = width * height;
-        int filledPixels = 0;
-
-        // Use the root frame to access pixel data
-        var frame = image.Frames.RootFrame;
-
-        for (int y = 0; y < height; y++)
+        int filled = 0;
+        int total = image.Width * image.Height;
+        image.ProcessPixelRows(pa =>
         {
-            // Use DangerousGetPixelRowMemory instead of GetPixelRowSpan
-            Span<Rgba32> pixelRow = frame.DangerousGetPixelRowMemory(y).Span;
-
-            for (int x = 0; x < width; x++)
+            for (int y = 0; y < image.Height; y++)
             {
-                Rgba32 pixel = pixelRow[x];
-
-                // Compute brightness (average of R, G, B)
-                int brightness = (pixel.R + pixel.G + pixel.B) / 3;
-
-                if (brightness < brightnessThreshold)
+                Span<Rgba32> row = pa.GetRowSpan(y);
+                for (int x = 0; x < row.Length; x++)
                 {
-                    filledPixels++;
+                    Rgba32 p = row[x];
+                    int lum = (p.R + p.G + p.B) / 3;
+                    if (lum < brightnessThreshold) filled++;
                 }
             }
-        }
-
-        double fillRatio = (double)filledPixels / totalPixels;
-        return fillRatio;
+        });
+        return (double)filled / total;
     }
-
-    #region private helpers
-
-    #region detection section
-
-    /// <summary>
-    /// Converts an ImageSharp Image&lt;Rgba32&gt; to an OpenCvSharp Mat (BGRA).
-    /// </summary>
-    private static Mat ToMat(Image<Rgba32> source)
-    {
-        if (source is null)
-            throw new ArgumentNullException(nameof(source));
-
-        // We'll store 8-bit BGRA in the Mat
-        var mat = new Mat(source.Height, source.Width, MatType.CV_8UC4);
-
-        // For older ImageSharp versions, use source[x, y] directly
-        for (int y = 0; y < source.Height; y++)
-        {
-            for (int x = 0; x < source.Width; x++)
-            {
-                Rgba32 pixel = source[x, y];
-                // Note OpenCV default is typically BGR(A),
-                // so we place data in BGRA order
-                mat.Set(y, x, new Vec4b(pixel.B, pixel.G, pixel.R, pixel.A));
-            }
-        }
-
-        return mat;
-    }
-    public static Image<Rgba32> ToImageSharpRgba32(this Mat mat)
-    {
-        if (mat.Empty())
-            throw new ArgumentException("Input Mat is empty.", nameof(mat));
-
-        int width = mat.Width;
-        int height = mat.Height;
-        int channels = mat.Channels();
-
-        // Create the ImageSharp image
-        var image = new Image<Rgba32>(width, height);
-
-        switch (channels)
-        {
-            // --- 1 channel: Grayscale => replicate same value into R, G, B
-            case 1:
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        byte gray = mat.At<byte>(y, x);
-                        image[x, y] = new Rgba32(gray, gray, gray, 255);
-                    }
-                }
-                break;
-
-            // --- 3 channels: BGR => convert to R,G,B + alpha=255
-            case 3:
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        // Vec3b has B,G,R in .Item0, .Item1, .Item2
-                        var color = mat.Get<Vec3b>(y, x);
-                        image[x, y] = new Rgba32(
-                            r: color.Item2,
-                            g: color.Item1,
-                            b: color.Item0,
-                            a: 255);
-                    }
-                }
-                break;
-
-            // --- 4 channels: BGRA => convert to R,G,B,A
-            case 4:
-                for (int y = 0; y < height; y++)
-                {
-                    for (int x = 0; x < width; x++)
-                    {
-                        // Vec4b has B,G,R,A in .Item0, .Item1, .Item2, .Item3
-                        var color = mat.Get<Vec4b>(y, x);
-                        image[x, y] = new Rgba32(
-                            r: color.Item2,
-                            g: color.Item1,
-                            b: color.Item0,
-                            a: color.Item3);
-                    }
-                }
-                break;
-
-            default:
-                throw new NotSupportedException(
-                    $"Mat with {channels} channels is not supported for direct conversion.");
-        }
-
-        return image;
-    }
-
-    /// <summary>
-    /// Detects all ArUco markers in the given image, looks for pairs of IDs (2*n, 2*n + 1),
-    /// and extracts the rectangular region between them (excluding the markers themselves).
-    /// Returns a list of (boxId, croppedMat).
-    /// </summary>
-    /// <param name="inputImage">Input BGR image.</param>
-    /// <returns>A list of (boxId, extracted Mat) for each found box.</returns>
-    private static List<(int BoxId, Mat Cropped)> ExtractAllAnchorBoxes(Mat inputImage)
-    {
-        if (inputImage == null || inputImage.Empty())
-            throw new ArgumentException("Input image is null or empty.", nameof(inputImage));
-
-        using var gray = new Mat();
-        Cv2.CvtColor(inputImage, gray, ColorConversionCodes.BGR2GRAY);
-
-        var parameters = new DetectorParameters()
-        {
-            CornerRefinementMethod = CornerRefineMethod.Subpix
-        };
-
-        var dict = CvAruco.GetPredefinedDictionary(PredefinedDictionaryName.Dict4X4_50);
-
-        CvAruco.DetectMarkers(
-            gray,
-            dict,
-            out Point2f[][] corners,
-            out int[] ids,
-            parameters,
-            out _
-        );
-
-        if (ids.Length == 0)
-            return new List<(int, Mat)>();
-
-        var markerCornersDict = new Dictionary<int, Point2f[]>();
-        for (int i = 0; i < ids.Length; i++)
-            markerCornersDict[ids[i]] = corners[i];
-
-        var uniqueIds = new List<int>(markerCornersDict.Keys);
-        uniqueIds.Sort();
-
-        var results = new List<(int BoxId, Mat Cropped)>();
-
-        foreach (int markerId in uniqueIds)
-        {
-            if (markerId % 2 != 0)
-                continue;
-
-            int nextId = markerId + 1;
-            if (!markerCornersDict.ContainsKey(nextId))
-                continue;
-
-            int boxId = markerId / 2;
-
-            var cornersTopLeft = markerCornersDict[markerId];
-            var cornersBottomRight = markerCornersDict[nextId];
-
-            var cropped = CropByTwoMarkers(inputImage, cornersTopLeft, cornersBottomRight);
-
-            results.Add((boxId, cropped));
-        }
-
-        return results;
-    }
-
-    /// <summary>
-    ///  Crops the rectangle that lies BETWEEN the given TL and BR ArUco markers,
-    ///  optionally skips a safety margin (<paramref name="innerPadding"/>), paints
-    ///  the markers out (transparent or black), and auto-orients the result so
-    ///  that TL really ends up at the top-left corner of the returned Mat.
-    /// </summary>
-    private static Mat CropByTwoMarkers(
-        Mat inputImage,
-        Point2f[] markerTL,              // must be the SMALLER-ID marker
-        Point2f[] markerBR,              // must be the LARGER-ID marker
-        int innerPadding = 2,
-        bool transparent = true,
-        bool autoOrient = true)
-    {
-        Rect tlRect = Cv2.BoundingRect(markerTL);
-        Rect brRect = Cv2.BoundingRect(markerBR);
-
-        int left = tlRect.Right + innerPadding;
-        int top = tlRect.Bottom + innerPadding;
-        int right = brRect.Left - innerPadding;
-        int bottom = brRect.Top - innerPadding;
-
-        // clamp & ensure non-empty
-        left = Math.Clamp(left, 0, inputImage.Width - 2);
-        top = Math.Clamp(top, 0, inputImage.Height - 2);
-        right = Math.Clamp(right, left + 1, inputImage.Width - 1);
-        bottom = Math.Clamp(bottom, top + 1, inputImage.Height - 1);
-
-        var inner = new Rect(left, top, right - left, bottom - top);
-        var roi = new Mat(inputImage, inner).Clone();
-
-        Scalar hole = transparent ? new Scalar(0, 0, 0, 0) : Scalar.Black;
-
-        void ZapMarker(Point2f[] marker)
-        {
-            Rect r = Cv2.BoundingRect(marker);
-            r.X = r.X - inner.X;           // ROI-local coordinates
-            r.Y = r.Y - inner.Y;
-            r.Width = Math.Min(r.Width, roi.Width - r.X);
-            r.Height = Math.Min(r.Height, roi.Height - r.Y);
-            Cv2.Rectangle(roi, r, hole, thickness: -1);
-        }
-
-        ZapMarker(markerTL);
-        ZapMarker(markerBR);
-
-        if (autoOrient)
-        {
-            static Point2f C(Point2f[] pts) =>
-                new((float)pts.Average(p => p.X), (float)pts.Average(p => p.Y));
-
-            float dx = C(markerBR).X - C(markerTL).X;
-            float dy = C(markerBR).Y - C(markerTL).Y;
-
-            if (dx < 0 && dy < 0) Cv2.Rotate(roi, roi, RotateFlags.Rotate180);
-        }
-
-        return roi;
-    }
-
 
     /// <summary>
     /// Crops an ImageSharp image to the tight bounding box of the signature,
-    /// using adaptive thresholding for robust foreground detection.
-    /// The returned image is a COLOR crop of the original, not thresholded.
+    /// using simple colour heuristics.  Pixels that fall inside a small
+    /// <paramref name="cornerStrip"/>×<paramref name="cornerStrip"/> square
+    /// in the TL or BR corner are ignored so that residual ArUco artefacts
+    /// do not inflate the bounding-box.
     /// </summary>
     public static Image<Rgba32> TrimBasedOnBinarisedImage(
-    Image<Rgba32> src,
-    int minBlue = 60,
-    int minIntensity = 30,
-    int padding = 10 // <-- new parameter
-)
+        Image<Rgba32> src,
+        int minBlue = 60,
+        int minIntensity = 30,
+        int padding = 10,
+        int cornerStrip = 6       // ← NEW optional parameter (defaults to 6 px)
+    )
     {
         if (src is null || src.Width == 0 || src.Height == 0)
             throw new ArgumentException("Input image is null or empty.", nameof(src));
 
-        int w = src.Width;
-        int h = src.Height;
-        using var matMask = new Mat(h, w, MatType.CV_8UC1, Scalar.All(0));
+        int w = src.Width, h = src.Height;
+        int minX = w, minY = h, maxX = 0, maxY = 0;
+        bool found = false;
 
-        // Build color mask for blue/black ink
-        src.ProcessPixelRows(pa => {
+        src.ProcessPixelRows(pa =>
+        {
             for (int y = 0; y < h; y++)
             {
                 Span<Rgba32> row = pa.GetRowSpan(y);
-                unsafe
+                for (int x = 0; x < w; x++)
                 {
-                    byte* dst = (byte*)matMask.Ptr(y);
-                    for (int x = 0; x < w; x++)
-                    {
-                        var px = row[x];
-                        if (
-                            (px.B > minBlue && px.B > px.R + 15 && px.B > px.G + 15) ||
-                            (px.R < minIntensity && px.G < minIntensity && px.B < minIntensity)
-                        )
-                            dst[x] = 255;
-                    }
+                    /* Skip the two marker-corner squares */
+                    bool inTopLeftCorner = x < cornerStrip && y < cornerStrip;
+                    bool inBottomRight = x >= w - cornerStrip && y >= h - cornerStrip;
+                    if (inTopLeftCorner || inBottomRight) continue;
+
+                    var p = row[x];
+                    bool isInk =
+                        (p.B > minBlue && p.B > p.R + 15 && p.B > p.G + 15) ||   // blueish
+                        (p.R < minIntensity && p.G < minIntensity && p.B < minIntensity); // dark
+
+                    if (!isInk) continue;
+
+                    found = true;
+                    if (x < minX) minX = x;
+                    if (y < minY) minY = y;
+                    if (x > maxX) maxX = x;
+                    if (y > maxY) maxY = y;
                 }
             }
         });
 
-        using var nonZero = new Mat();
-        Cv2.FindNonZero(matMask, nonZero);
-        if (nonZero.Empty())
-            return new Image<Rgba32>(padding * 2 + 1, padding * 2 + 1);
+        if (!found)
+            return new Image<Rgba32>(padding * 2 + 1, padding * 2 + 1);      // blank
 
-        var points = new OpenCvSharp.Point[nonZero.Rows];
-        for (int i = 0; i < nonZero.Rows; i++)
-            points[i] = nonZero.Get<OpenCvSharp.Point>(i);
-        var boundingRect = Cv2.BoundingRect(points);
+        var crop = new Rectangle(minX, minY, maxX - minX + 1, maxY - minY + 1);
+        using var tight = src.Clone(ctx => ctx.Crop(crop));
 
-        // 1. Crop the signature tightly (no padding yet)
-        var cropRect = new SixLabors.ImageSharp.Rectangle(boundingRect.X, boundingRect.Y, boundingRect.Width, boundingRect.Height);
-        using var cropped = src.Clone(ctx => ctx.Crop(cropRect));
-
-        // 2. Create new blank image with desired border (padding on all sides)
-        int outW = cropped.Width + padding * 2;
-        int outH = cropped.Height + padding * 2;
-        var canvas = new Image<Rgba32>(outW, outH, Color.White);
-
-        // 3. Paste the cropped signature centered (with padding)
-        canvas.Mutate(ctx => ctx.DrawImage(cropped, new SixLabors.ImageSharp.Point(padding, padding), 1));
-
+        var canvas = new Image<Rgba32>(tight.Width + 2 * padding,
+                                       tight.Height + 2 * padding,
+                                       Color.White);
+        canvas.Mutate(ctx => ctx.DrawImage(tight,
+                                           new Point(padding, padding),
+                                           1f));
         return canvas;
     }
 
+    #region private helpers
 
-    #endregion
 
-    private static void ValidateGeneratorOptions(InkAnchorGeneratorOptions options)
-    {
-        if (options.PixelWidth < InkAnchorGeneratorOptions.BoxMinWidth)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options.PixelWidth),
-                options.PixelWidth,
-                $"minimum allowed length for box width is {InkAnchorGeneratorOptions.BoxMinWidth} pixels");
-        }
-
-        if (options.PixelHeight < InkAnchorGeneratorOptions.BoxMinHeight)
-        {
-            throw new ArgumentOutOfRangeException(nameof(options.PixelHeight),
-                options.PixelHeight,
-                $"minimum allowed length for box height is {InkAnchorGeneratorOptions.BoxMinHeight} pixels");
-        }
-    }
-
-    private static Task<(Image<Rgba32>? image, string? svg)>
-        GenerateIngAnchorBoxAsync(InkAnchorGeneratorOptions options, bool generateSvg)
+    private static Task<(Image<Rgba32>? image, string? svg)> GenerateIngAnchorBoxAsync(
+    InkAnchorGeneratorOptions options, bool generateSvg)
     {
         ValidateGeneratorOptions(options);
-
         int width = options.PixelWidth;
         int boxHeight = options.PixelHeight;
         byte boxId = options.BoxId;
@@ -428,8 +141,8 @@ public static class InkAnchorHandler
         if (!generateSvg)
         {
             // -- RASTER GENERATION (PNG, etc.) --
-            var topLeftMarker = GenerateArucoMarkerImage(boxId * 2, markerSize, markerBorderBits);
-            var bottomRightMarker = GenerateArucoMarkerImage(boxId * 2 + 1, markerSize, markerBorderBits);
+            var topLeftMarker = CustomArucoDrawer.DrawArucoMarkerManually(boxId * 2, markerSize, markerBorderBits);
+            var bottomRightMarker = CustomArucoDrawer.DrawArucoMarkerManually(boxId * 2 + 1, markerSize, markerBorderBits);
 
             var image = new Image<Rgba32>(width, totalHeight);
             image.Mutate(ctx =>
@@ -524,6 +237,156 @@ public static class InkAnchorHandler
         }
     }
 
+    private sealed record MarkerHit(int Id, Rectangle Rect);
+
+    /// <remarks>
+    /// Finds 4 × 4 ArUco markers without OpenCV.  
+    /// Works for every rotation and a range of cell-sizes.
+    /// </remarks>
+    private static IEnumerable<MarkerHit> DetectMarkers(
+    Image<Rgba32> img,
+    int borderBits = 1,
+    int minCellPx = 4,
+    int maxCellPx = 14)
+    {
+        int w = img.Width, h = img.Height;
+
+        // --- luminance buffer ----------------------------------------------------
+        var lum = new byte[w * h];
+        img.ProcessPixelRows(pa =>
+        {
+            for (int y = 0; y < h; y++)
+            {
+                var row = pa.GetRowSpan(y);
+                for (int x = 0; x < w; x++)
+                    lum[y * w + x] =
+                        (byte)((row[x].R + row[x].G + row[x].B) / 3);
+            }
+        });
+
+        // --- scan every plausible cell size -------------------------------------
+        for (int cell = minCellPx; cell <= maxCellPx; cell++)
+        {
+            int win = (4 + 2 * borderBits) * cell;
+            int step = Math.Max(1, cell / 2);
+
+            for (int top = 0; top <= h - win; top += step)
+            {
+                for (int left = 0; left <= w - win; left += step)
+                {
+                    // cheap four-corner reject
+                    if (lum[top * w + left] > 50 ||
+                        lum[top * w + left + win - 1] > 50 ||
+                        lum[(top + win - 1) * w + left] > 50 ||
+                        lum[(top + win - 1) * w + left + win - 1] > 50)
+                        continue;
+
+                    // --- sample 4×4 payload -----------------------------------------
+                    Span<byte> bits = stackalloc byte[16];
+                    for (int cy = 0; cy < 4; cy++)
+                        for (int cx = 0; cx < 4; cx++)
+                        {
+                            int sx = left + (borderBits + cx) * cell + cell / 2;
+                            int sy = top + (borderBits + cy) * cell + cell / 2;
+                            bits[cy * 4 + cx] = (byte)(lum[sy * w + sx] < 128 ? 0 : 1);
+                        }
+
+                    // --- compare against dictionary ----------------------------------
+                    for (int id = 0; id < ArucoDict4x4_50.Markers.Length; id++)
+                    {
+                        var refBits = ArucoDict4x4_50.GetMarkerBits(id); // byte[4,4]
+
+                        if (MatchAnyRotation(bits, refBits))
+                        {
+                            yield return new MarkerHit(id,
+                                         new Rectangle(left, top, win, win));
+                            left += win - step;          // skip duplicates
+                            break;                        // next window
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------------
+    // 2.  Helper lives *outside* DetectMarkers – no closure -> no compiler error
+    // -----------------------------------------------------------------------------
+    private static bool MatchAnyRotation(ReadOnlySpan<byte> bits, byte[,] refBits)
+    {
+        for (int rot = 0; rot < 4; rot++)          // 0°,90°,180°,270°
+        {
+            bool ok = true;
+
+            for (int cy = 0; cy < 4 && ok; cy++)
+                for (int cx = 0; cx < 4 && ok; cx++)
+                {
+                    int tx, ty;                        // target in reference
+                    switch (rot)
+                    {
+                        case 0: tx = cx; ty = cy; break;
+                        case 1: tx = 3 - cy; ty = cx; break;
+                        case 2: tx = 3 - cx; ty = 3 - cy; break;
+                        default: tx = cy; ty = 3 - cx; break;
+                    }
+                    if (bits[cy * 4 + cx] != refBits[ty, tx])
+                        ok = false;
+                }
+            if (ok) return true;
+        }
+        return false;
+    }
+
+    /* ExtractAllAnchorBoxes keeps its public signature – only the internals
+       are switched to the new DetectMarkers that yields good hits again. */
+    private static List<(int BoxId, Image<Rgba32> Cropped)>
+        ExtractAllAnchorBoxes(Image<Rgba32> img)
+    {
+        var hits = DetectMarkers(img).ToList();
+        if (hits.Count == 0) return new();
+
+        /* build lookup table (same as before) */
+        var map = new Dictionary<int, Rectangle>();
+        foreach (var h in hits)
+        { map.TryAdd(h.Id, h.Rect); }
+        var result = new List<(int, Image<Rgba32>)>();
+
+        foreach (int id in map.Keys.OrderBy(k => k))
+        {
+            if (id % 2 != 0) continue;       // we want the TL marker (even)
+            int brId = id + 1;
+            if (!map.TryGetValue(brId, out var brRect)) continue;
+            var tlRect = map[id];
+
+            int left = tlRect.Right + 2;
+            int top = tlRect.Bottom + 2;
+            int right = brRect.Left - 2;
+            int bottom = brRect.Top - 2;
+            if (right <= left || bottom <= top) continue;
+
+            var box = new Rectangle(left, top, right - left, bottom - top);
+            var cropped = img.Clone(ctx => ctx.Crop(box));
+            result.Add((id / 2, cropped));
+        }
+        return result;
+    }
+
+    private static void ValidateGeneratorOptions(InkAnchorGeneratorOptions options)
+    {
+        if (options.PixelWidth < InkAnchorGeneratorOptions.BoxMinWidth)
+            throw new ArgumentOutOfRangeException(nameof(options.PixelWidth));
+        if (options.PixelHeight < InkAnchorGeneratorOptions.BoxMinHeight)
+            throw new ArgumentOutOfRangeException(nameof(options.PixelHeight));
+    }
+
+    private static string EscapeXml(string s) => System.Security.SecurityElement.Escape(s) ?? string.Empty;
+
+    private static string ToSvgHex(this Color c)
+    {
+        var p = c.ToPixel<Rgba32>();
+        return $"#{p.R:X2}{p.G:X2}{p.B:X2}";
+    }
+
     /// <summary>
     /// Draws a dashed (or dotted) line by repeatedly drawing short solid line segments.
     /// </summary>
@@ -556,16 +419,23 @@ public static class InkAnchorHandler
         }
     }
 
-    public static string ToSvgHex(this Color color)
+    private static float CalculateLabelY(InkAnchorLabel label, int labelOffsetTop, int boxHeight)
     {
-        var rgba = color.ToPixel<Rgba32>();
-        return $"#{rgba.R:X2}{rgba.G:X2}{rgba.B:X2}";
+        const float padding = 5;
+        return label.LabelPlacement switch
+        {
+            //BoxLabelPlacement.TopInsideBox => labelOffsetTop + padding,
+            //BoxLabelPlacement.BottomInsideBox => labelOffsetTop + boxHeight - label.FontSize - padding,
+            BoxLabelPlacement.TopOutsideBox => padding,
+            BoxLabelPlacement.BottomOutsideBox => labelOffsetTop + boxHeight + padding,
+            _ => labelOffsetTop + boxHeight - label.FontSize - padding
+        };
     }
 
     private static string GenerateSvg(InkAnchorGeneratorOptions options, byte boxId, int markerSize, int markerBorderBits, int labelExtraTop, int boxHeight, int width, int totalHeight, int markerPadding)
     {
-        var svgTopLeft = GenerateArucoMarkerSvg(boxId * 2, markerSize, markerBorderBits);
-        var svgBottomRight = GenerateArucoMarkerSvg(boxId * 2 + 1, markerSize, markerBorderBits);
+        var svgTopLeft = CustomArucoDrawer.GenerateArucoMarkerSvgManually(boxId * 2, markerSize, markerBorderBits);
+        var svgBottomRight = CustomArucoDrawer.GenerateArucoMarkerSvgManually(boxId * 2 + 1, markerSize, markerBorderBits);
 
         string fillColor = options.FillColor?.ToSvgHex() ?? "none";
 
@@ -573,7 +443,7 @@ public static class InkAnchorHandler
         if (options.BoxLabel is { } labelOpt)
         {
             var extraY = 12;
-            if(labelOpt.LabelPlacement == BoxLabelPlacement.TopOutsideBox)
+            if (labelOpt.LabelPlacement == BoxLabelPlacement.TopOutsideBox)
             {
                 extraY *= -1;
             }
@@ -643,51 +513,6 @@ public static class InkAnchorHandler
 
         return svg;
     }
-
-    private static Image<Rgba32> GenerateArucoMarkerImage(int markerId, int pixelSize, int borderBits)
-    {
-        var dict = CvAruco.GetPredefinedDictionary(PredefinedDictionaryName.Dict4X4_50);
-
-        using var markerMat = CustomArucoDrawer.DrawArucoMarkerManually(
-            dict, markerId, pixelSize, borderBits);
-
-        var image = new Image<Rgba32>(markerMat.Width, markerMat.Height);
-        for (int y = 0; y < markerMat.Height; y++)
-        {
-            for (int x = 0; x < markerMat.Width; x++)
-            {
-                byte value = markerMat.At<byte>(y, x);
-                image[x, y] = value == 1
-                    ? new Rgba32(255, 255, 255)
-                    : new Rgba32(0, 0, 0);
-            }
-        }
-        return image;
-    }
-
-    private static string GenerateArucoMarkerSvg(int markerId, int pixelSize, int borderBits)
-    {
-        var dict = CvAruco.GetPredefinedDictionary(PredefinedDictionaryName.Dict4X4_50);
-        return CustomArucoDrawer.GenerateArucoMarkerSvgManually(
-            dict, markerId, pixelSize, borderBits);
-    }
-
-    private static float CalculateLabelY(InkAnchorLabel label, int labelOffsetTop, int boxHeight)
-    {
-        const float padding = 5;
-        return label.LabelPlacement switch
-        {
-            //BoxLabelPlacement.TopInsideBox => labelOffsetTop + padding,
-            //BoxLabelPlacement.BottomInsideBox => labelOffsetTop + boxHeight - label.FontSize - padding,
-            BoxLabelPlacement.TopOutsideBox => padding,
-            BoxLabelPlacement.BottomOutsideBox => labelOffsetTop + boxHeight + padding,
-            _ => labelOffsetTop + boxHeight - label.FontSize - padding
-        };
-    }
-
-    private static string EscapeXml(string input) =>
-        System.Security.SecurityElement.Escape(input) ?? "";
-
 
     #endregion
 }

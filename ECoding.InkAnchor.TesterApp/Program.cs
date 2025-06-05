@@ -1,7 +1,6 @@
 ﻿using ECoding.InkAnchor;
 using iText.Svg.Converter;
 using iTextSharp.text.pdf;
-using OpenCvSharp;
 using QuestPDF.Fluent;
 using QuestPDF.Helpers;
 using QuestPDF.Infrastructure;
@@ -9,36 +8,35 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
 using SkiaSharp;
 using SkiaSharp.Extended.Svg;
+using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using Image = SixLabors.ImageSharp.Image;
 
-
 /*Generate PDF With raster image*/
 
+//Console.WriteLine("Generating PDF with signature box...");
 
-Console.WriteLine("Generating PDF with signature box...");
+//QuestPDF.Settings.License = LicenseType.Community;
 
-QuestPDF.Settings.License = LicenseType.Community;
+//var options = new InkAnchorGeneratorOptions(boxId: 2, pixelWidth: 200, pixelHeight: 100)
+//{
+//    FillColor = null, // transparent
+//    Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1, InkAnchorBorder.BorderStyle.Solid, InkAnchorBorder.BorderSides.All),
+//    BoxLabel = new InkAnchorLabel("Podpis poistníka", BoxLabelPlacement.BottomOutsideBox, fontSize: 14),
+//    MarkerPixelSize = 20,
+//    MarkerBorderBits = 1
+//};
 
-var options = new InkAnchorGeneratorOptions(boxId: 2, pixelWidth: 200, pixelHeight: 100)
-{
-    FillColor = null, // transparent
-    Border = new InkAnchorBorder(SixLabors.ImageSharp.Color.Black, 1, InkAnchorBorder.BorderStyle.Solid, InkAnchorBorder.BorderSides.All),
-    BoxLabel = new InkAnchorLabel("Podpis poistníka", BoxLabelPlacement.BottomOutsideBox, fontSize: 14),
-    MarkerPixelSize = 20,
-    MarkerBorderBits = 1
-};
+//// Generate the signature box image
+//var boxImage = await InkAnchorHandler.GenerateAnchorBoxImageAsync(options);
 
-// Generate the signature box image
-var boxImage = await InkAnchorHandler.GenerateAnchorBoxImageAsync(options);
+//// Convert ImageSharp image to byte array (PNG)
+//using var ms = new MemoryStream();
+//await boxImage.SaveAsPngAsync(ms);
+//var imageBytes = ms.ToArray();
 
-// Convert ImageSharp image to byte array (PNG)
-using var ms = new MemoryStream();
-await boxImage.SaveAsPngAsync(ms);
-var imageBytes = ms.ToArray();
-
-// Define PDF document
+//// Define PDF document
 //var pdf = Document.Create(container =>
 //{
 //    container.Page(page =>
@@ -66,6 +64,61 @@ var imageBytes = ms.ToArray();
 //// Save PDF to file
 //pdf.GeneratePdf(@"InkAnchor.pdf");
 
+
+/*Generate SVG PDF example*/
+//Console.WriteLine("Generating PDF with signature box...");
+
+//QuestPDF.Settings.License = LicenseType.Community;
+
+//var options = new InkAnchorGeneratorOptions(
+//                  boxId: 2, pixelWidth: 200, pixelHeight: 100)
+//{
+//    FillColor = null,
+//    Border = new InkAnchorBorder(
+//                   SixLabors.ImageSharp.Color.Black, 1,
+//                   InkAnchorBorder.BorderStyle.Solid,
+//                   InkAnchorBorder.BorderSides.All),
+//    BoxLabel = new InkAnchorLabel(
+//                          "Podpis poistníka",
+//                          BoxLabelPlacement.BottomOutsideBox,
+//                          fontSize: 14),
+//    MarkerPixelSize = 20,
+//    MarkerBorderBits = 1
+//};
+
+//// 1) ─── generate SVG instead of PNG ──────────────────────────────
+//string svgMarkup = await InkAnchorHandler.GenerateAnchorBoxSvgAsync(options);
+
+
+//// 2) ─── build PDF ────────────────────────────────────────────────
+//var pdf = Document.Create(container =>
+//{
+//    container.Page(page =>
+//    {
+//        page.Size(PageSizes.A4);
+//        page.Margin(20);
+//        page.DefaultTextStyle(x => x.FontSize(20));
+
+//        page.Content().PaddingVertical(20).Column(col =>
+//        {
+//            col.Item().Text("This is a test document.");
+//            col.Item().Element(e => e.Extend());      // flexible spacer
+//        });
+
+//        page.Footer().Row(row =>
+//        {
+//            row.RelativeItem();                       // left spacer
+//            row.ConstantItem(options.PixelWidth)      // same width as box
+//               .PaddingRight(20)
+//               .PaddingBottom(20)
+//               // 3) ── display the SVG ────────────────────────────
+//               .Svg(svgMarkup);        // <- extension from QuestPDF.Svg
+//        });
+//    });
+//});
+
+//// 4) ─── save ─────────────────────────────────────────────────────
+//pdf.GeneratePdf("InkAnchor.pdf");
 
 /*
 async Task<byte[]> PrintSignatureFieldAsync(byte[] pdf, bool manualSignatureField)
@@ -350,7 +403,7 @@ catch (Exception ex)
 /*Test extraction and trimming*/
 
 
-string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\Scan_0009_page-0001.jpg";
+string inputImagePath = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\InkAnchor_page-0001 (1).jpg";
 string outputFolder = @"C:\Dev\ECoding\ECoding.InkAnchor\ECoding.InkAnchor.TesterApp\";
 
 if (!File.Exists(inputImagePath))
