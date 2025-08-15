@@ -6,6 +6,7 @@ using SixLabors.Fonts;
 using static ECoding.InkAnchor.InkAnchorBorder;
 using System.Text;
 using SixLabors.ImageSharp.Advanced;
+using System.Runtime.CompilerServices;
 
 namespace ECoding.InkAnchor;
 
@@ -243,15 +244,18 @@ public static class InkAnchorHandler
     /// Finds 4 × 4 ArUco markers without OpenCV.  
     /// Works for every rotation and a range of cell-sizes.
     /// </remarks>
+    // add at top of file:
+    // using System.Threading.Tasks;
+
     private static IEnumerable<MarkerHit> DetectMarkers(
-    Image<Rgba32> img,
-    int borderBits = 1,
-    int minCellPx = 4,
-    int maxCellPx = 14)
+        Image<Rgba32> img,
+        int borderBits = 1,
+        int minCellPx = 4,
+        int maxCellPx = 14)
     {
         int w = img.Width, h = img.Height;
 
-        // --- luminance buffer ----------------------------------------------------
+        // ---- 1) Luminance buffer (8-bit) ----
         var lum = new byte[w * h];
         img.ProcessPixelRows(pa =>
         {
@@ -259,54 +263,174 @@ public static class InkAnchorHandler
             {
                 var row = pa.GetRowSpan(y);
                 for (int x = 0; x < w; x++)
-                    lum[y * w + x] =
-                        (byte)((row[x].R + row[x].G + row[x].B) / 3);
+                    lum[y * w + x] = (byte)((row[x].R + row[x].G + row[x].B) / 3);
             }
         });
 
-        // --- scan every plausible cell size -------------------------------------
-        for (int cell = minCellPx; cell <= maxCellPx; cell++)
+        // ---- 2) Integral image (summed-area table) with exclusive coords ----
+        int istride = w + 1;
+        var ii = new long[(h + 1) * istride];
+        for (int y = 1; y <= h; y++)
         {
-            int win = (4 + 2 * borderBits) * cell;
-            int step = Math.Max(1, cell / 2);
-
-            for (int top = 0; top <= h - win; top += step)
+            long rowsum = 0;
+            int lumRow = (y - 1) * w;
+            int iiRow = y * istride;
+            int iiPrevRow = (y - 1) * istride;
+            for (int x = 1; x <= w; x++)
             {
-                for (int left = 0; left <= w - win; left += step)
-                {
-                    // cheap four-corner reject
-                    if (lum[top * w + left] > 50 ||
-                        lum[top * w + left + win - 1] > 50 ||
-                        lum[(top + win - 1) * w + left] > 50 ||
-                        lum[(top + win - 1) * w + left + win - 1] > 50)
-                        continue;
-
-                    // --- sample 4×4 payload -----------------------------------------
-                    Span<byte> bits = stackalloc byte[16];
-                    for (int cy = 0; cy < 4; cy++)
-                        for (int cx = 0; cx < 4; cx++)
-                        {
-                            int sx = left + (borderBits + cx) * cell + cell / 2;
-                            int sy = top + (borderBits + cy) * cell + cell / 2;
-                            bits[cy * 4 + cx] = (byte)(lum[sy * w + sx] < 128 ? 0 : 1);
-                        }
-
-                    // --- compare against dictionary ----------------------------------
-                    for (int id = 0; id < ArucoDict4x4_50.Markers.Length; id++)
-                    {
-                        var refBits = ArucoDict4x4_50.GetMarkerBits(id); // byte[4,4]
-
-                        if (MatchAnyRotation(bits, refBits))
-                        {
-                            yield return new MarkerHit(id,
-                                         new Rectangle(left, top, win, win));
-                            left += win - step;          // skip duplicates
-                            break;                        // next window
-                        }
-                    }
-                }
+                rowsum += lum[lumRow + (x - 1)];
+                ii[iiRow + x] = ii[iiPrevRow + x] + rowsum;
             }
         }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        static long SumRect(long[] sat, int stride, int x0, int y0, int x1, int y1)
+            => sat[y1 * stride + x1] - sat[y1 * stride + x0]
+             - sat[y0 * stride + x1] + sat[y0 * stride + x0];
+
+        // ---- 3) Pattern lookup table (all rotations) -> id (O(1) array, no hashing) ----
+        static int BitIndex(int r, int c) => 15 - (r * 4 + c);
+        static ushort RotateFlat(ushort v, int rot)
+        {
+            ushort outV = 0;
+            for (int r = 0; r < 4; r++)
+                for (int c = 0; c < 4; c++)
+                {
+                    int bit = (v >> BitIndex(r, c)) & 1;
+                    if (bit == 0) continue;
+                    int tr, tc;
+                    switch (rot)
+                    {
+                        case 0: tr = r; tc = c; break;
+                        case 1: tr = c; tc = 3 - r; break;
+                        case 2: tr = 3 - r; tc = 3 - c; break;
+                        default: tr = 3 - c; tc = r; break;
+                    }
+                    outV |= (ushort)(1 << BitIndex(tr, tc));
+                }
+            return outV;
+        }
+
+        // idByPattern: -1 = not a valid marker, otherwise marker id
+        var idByPattern = new int[1 << 16];
+        Array.Fill(idByPattern, -1);
+        for (int id = 0; id < ArucoDict4x4_50.Markers.Length; id++)
+        {
+            ushort baseV = ArucoDict4x4_50.Markers[id];              // 16-bit pattern
+            idByPattern[RotateFlat(baseV, 0)] = id;
+            idByPattern[RotateFlat(baseV, 1)] = id;
+            idByPattern[RotateFlat(baseV, 2)] = id;
+            idByPattern[RotateFlat(baseV, 3)] = id;
+        }
+
+        // ---- 4) Scan over scales; parallelize the vertical sweep per scale ----
+        var results = new List<MarkerHit>(64);
+
+        for (int cell = minCellPx; cell <= maxCellPx; cell++)
+        {
+            int t = borderBits * cell;                 // black border thickness
+            int win = (4 + 2 * borderBits) * cell;       // window size
+            if (win > w || win > h) break;
+
+            // Good balance of speed/recall; you can try "cell" for even more speed.
+            int step = Math.Max(1, cell / 2);
+
+            // Precompute inner-cell centers for this scale
+            int[] cxCenter = new int[4], cyCenter = new int[4];
+            for (int i = 0; i < 4; i++)
+            {
+                cxCenter[i] = t + i * cell + cell / 2;
+                cyCenter[i] = t + i * cell + cell / 2;
+            }
+
+            // Tight center patch (skew/blur tolerant)
+            int r = Math.Max(1, cell / 5);
+            int patchArea = (2 * r + 1) * (2 * r + 1);
+
+            int innerSide = win - 2 * t;
+            if (innerSide <= 0) continue;
+            int ringArea = (win * t * 2) + ((win - 2 * t) * t * 2);
+            int innerArea = innerSide * innerSide;
+
+            int nTop = (h - win) / step + 1;
+
+            // Thread-local aggregation to avoid contention
+            Parallel.For(
+                0, nTop,
+                () => new List<MarkerHit>(8),
+                (ti, _, localHits) =>
+                {
+                    int top = ti * step;
+                    int y0Win = top, y1Win = top + win;
+                    int y0Inner = y0Win + t, y1Inner = y1Win - t;
+
+                    for (int left = 0; left <= w - win; left += step)
+                    {
+                        int x0Win = left, x1Win = left + win;
+                        int x0Inner = x0Win + t, x1Inner = x1Win - t;
+
+                        // --- lenient ring vs inner test (reject only if ring is brighter) ---
+                        long sumTop = SumRect(ii, istride, x0Win, y0Win, x1Win, y0Win + t);
+                        long sumBottom = SumRect(ii, istride, x0Win, y1Win - t, x1Win, y1Win);
+                        long sumLeft = SumRect(ii, istride, x0Win, y0Win + t, x0Win + t, y1Win - t);
+                        long sumRight = SumRect(ii, istride, x1Win - t, y0Win + t, x1Win, y1Win - t);
+                        long ringSum = sumTop + sumBottom + sumLeft + sumRight;
+                        long innerSum = SumRect(ii, istride, x0Inner, y0Inner, x1Inner, y1Inner);
+
+                        if (ringSum > innerSum) continue; // ring should be darker than inside
+
+                        // --- pass 1: get local min/max over 16 center patches ---
+                        long minSum = long.MaxValue, maxSum = long.MinValue;
+                        for (int cy = 0; cy < 4; cy++)
+                        {
+                            int cyc = y0Win + cyCenter[cy];
+                            int y0p = cyc - r, y1p = cyc + r + 1;
+                            for (int cx = 0; cx < 4; cx++)
+                            {
+                                int cxc = x0Win + cxCenter[cx];
+                                int x0p = cxc - r, x1p = cxc + r + 1;
+                                long s = SumRect(ii, istride, x0p, y0p, x1p, y1p);
+                                if (s < minSum) minSum = s;
+                                if (s > maxSum) maxSum = s;
+                            }
+                        }
+                        long thrSum = (minSum + maxSum) / 2;
+
+                        // --- pass 2: build observed 4x4 pattern (single pass, no alloc) ---
+                        ushort observed = 0;
+                        int bitPos = 15;
+                        for (int cy = 0; cy < 4; cy++)
+                        {
+                            int cyc = y0Win + cyCenter[cy];
+                            int y0p = cyc - r, y1p = cyc + r + 1;
+                            for (int cx = 0; cx < 4; cx++)
+                            {
+                                int cxc = x0Win + cxCenter[cx];
+                                int x0p = cxc - r, x1p = cxc + r + 1;
+                                long s = SumRect(ii, istride, x0p, y0p, x1p, y1p);
+                                if (s >= thrSum) observed |= (ushort)(1 << bitPos);
+                                bitPos--;
+                            }
+                        }
+
+                        int id = idByPattern[observed];
+                        if (id >= 0)
+                        {
+                            localHits.Add(new MarkerHit(id, new Rectangle(left, top, win, win)));
+                            // Skip horizontally overlapping windows in this row:
+                            left += win - step;
+                        }
+                    }
+
+                    return localHits;
+                },
+                localHits =>
+                {
+                    lock (results) results.AddRange(localHits);
+                });
+        }
+
+        return results;
     }
 
     // -----------------------------------------------------------------------------
