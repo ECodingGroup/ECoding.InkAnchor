@@ -244,18 +244,16 @@ public static class InkAnchorHandler
     /// Finds 4 × 4 ArUco markers without OpenCV.  
     /// Works for every rotation and a range of cell-sizes.
     /// </remarks>
-    // add at top of file:
-    // using System.Threading.Tasks;
 
     private static IEnumerable<MarkerHit> DetectMarkers(
-        Image<Rgba32> img,
-        int borderBits = 1,
-        int minCellPx = 4,
-        int maxCellPx = 14)
+    Image<Rgba32> img,
+    int borderBits = 1,
+    int minCellPx = 4,
+    int maxCellPx = 14)
     {
         int w = img.Width, h = img.Height;
 
-        // ---- 1) Luminance buffer (8-bit) ----
+        // ---- 1) Luminance (8-bit) ----
         var lum = new byte[w * h];
         img.ProcessPixelRows(pa =>
         {
@@ -267,7 +265,7 @@ public static class InkAnchorHandler
             }
         });
 
-        // ---- 2) Integral image (summed-area table) with exclusive coords ----
+        // ---- 2) Integral image (exclusive coords) ----
         int istride = w + 1;
         var ii = new long[(h + 1) * istride];
         for (int y = 1; y <= h; y++)
@@ -288,7 +286,7 @@ public static class InkAnchorHandler
             => sat[y1 * stride + x1] - sat[y1 * stride + x0]
              - sat[y0 * stride + x1] + sat[y0 * stride + x0];
 
-        // ---- 3) Pattern lookup table (all rotations) -> id (O(1) array, no hashing) ----
+        // ---- 3) Pattern LUT (all rotations) -> id (O(1)) ----
         static int BitIndex(int r, int c) => 15 - (r * 4 + c);
         static ushort RotateFlat(ushort v, int rot)
         {
@@ -311,39 +309,38 @@ public static class InkAnchorHandler
             return outV;
         }
 
-        // idByPattern: -1 = not a valid marker, otherwise marker id
         var idByPattern = new int[1 << 16];
         Array.Fill(idByPattern, -1);
         for (int id = 0; id < ArucoDict4x4_50.Markers.Length; id++)
         {
-            ushort baseV = ArucoDict4x4_50.Markers[id];              // 16-bit pattern
+            ushort baseV = ArucoDict4x4_50.Markers[id];
             idByPattern[RotateFlat(baseV, 0)] = id;
             idByPattern[RotateFlat(baseV, 1)] = id;
             idByPattern[RotateFlat(baseV, 2)] = id;
             idByPattern[RotateFlat(baseV, 3)] = id;
         }
 
-        // ---- 4) Scan over scales; parallelize the vertical sweep per scale ----
-        var results = new List<MarkerHit>(64);
+        // ---- 4) Scan scales (bottom-first rows, early-exit on first even/odd pair) ----
+        var results = new List<MarkerHit>(8);
+        // Track which ids were seen to detect even/odd pair quickly.
+        var seen = new int[ArucoDict4x4_50.Markers.Length]; // 0/1 flags
+        int havePair = 0;  // 0 = not yet, 1 = found; use as a volatile flag
 
-        for (int cell = minCellPx; cell <= maxCellPx; cell++)
+        for (int cell = minCellPx; cell <= maxCellPx && Volatile.Read(ref havePair) == 0; cell++)
         {
-            int t = borderBits * cell;                 // black border thickness
-            int win = (4 + 2 * borderBits) * cell;       // window size
+            int t = borderBits * cell;
+            int win = (4 + 2 * borderBits) * cell;
             if (win > w || win > h) break;
 
-            // Good balance of speed/recall; you can try "cell" for even more speed.
-            int step = Math.Max(1, cell / 2);
+            int step = Math.Max(1, cell / 2);      // good recall; try cell for more speed
 
-            // Precompute inner-cell centers for this scale
+            // Precompute cell centers and patch size
             int[] cxCenter = new int[4], cyCenter = new int[4];
             for (int i = 0; i < 4; i++)
             {
                 cxCenter[i] = t + i * cell + cell / 2;
                 cyCenter[i] = t + i * cell + cell / 2;
             }
-
-            // Tight center patch (skew/blur tolerant)
             int r = Math.Max(1, cell / 5);
             int patchArea = (2 * r + 1) * (2 * r + 1);
 
@@ -354,32 +351,35 @@ public static class InkAnchorHandler
 
             int nTop = (h - win) / step + 1;
 
-            // Thread-local aggregation to avoid contention
             Parallel.For(
                 0, nTop,
-                () => new List<MarkerHit>(8),
-                (ti, _, localHits) =>
+                new ParallelOptions { MaxDegreeOfParallelism = -1 },
+                () => new List<MarkerHit>(2),
+                (idx, state, localHits) =>
                 {
+                    // bottom-first ordering
+                    if (Volatile.Read(ref havePair) != 0) { state.Stop(); return localHits; }
+                    int ti = nTop - 1 - idx;
                     int top = ti * step;
+
                     int y0Win = top, y1Win = top + win;
                     int y0Inner = y0Win + t, y1Inner = y1Win - t;
 
-                    for (int left = 0; left <= w - win; left += step)
+                    for (int left = 0; left <= w - win && Volatile.Read(ref havePair) == 0; left += step)
                     {
                         int x0Win = left, x1Win = left + win;
                         int x0Inner = x0Win + t, x1Inner = x1Win - t;
 
-                        // --- lenient ring vs inner test (reject only if ring is brighter) ---
+                        // ring vs inner (very lenient: only reject if ring is brighter)
                         long sumTop = SumRect(ii, istride, x0Win, y0Win, x1Win, y0Win + t);
                         long sumBottom = SumRect(ii, istride, x0Win, y1Win - t, x1Win, y1Win);
                         long sumLeft = SumRect(ii, istride, x0Win, y0Win + t, x0Win + t, y1Win - t);
                         long sumRight = SumRect(ii, istride, x1Win - t, y0Win + t, x1Win, y1Win - t);
                         long ringSum = sumTop + sumBottom + sumLeft + sumRight;
                         long innerSum = SumRect(ii, istride, x0Inner, y0Inner, x1Inner, y1Inner);
+                        if (ringSum > innerSum) continue;
 
-                        if (ringSum > innerSum) continue; // ring should be darker than inside
-
-                        // --- pass 1: get local min/max over 16 center patches ---
+                        // local min/max of 16 center patches (pass 1)
                         long minSum = long.MaxValue, maxSum = long.MinValue;
                         for (int cy = 0; cy < 4; cy++)
                         {
@@ -394,9 +394,9 @@ public static class InkAnchorHandler
                                 if (s > maxSum) maxSum = s;
                             }
                         }
-                        long thrSum = (minSum + maxSum) / 2;
+                        long thr = (minSum + maxSum) / 2;
 
-                        // --- pass 2: build observed 4x4 pattern (single pass, no alloc) ---
+                        // build observed 4x4 pattern (pass 2)
                         ushort observed = 0;
                         int bitPos = 15;
                         for (int cy = 0; cy < 4; cy++)
@@ -408,7 +408,7 @@ public static class InkAnchorHandler
                                 int cxc = x0Win + cxCenter[cx];
                                 int x0p = cxc - r, x1p = cxc + r + 1;
                                 long s = SumRect(ii, istride, x0p, y0p, x1p, y1p);
-                                if (s >= thrSum) observed |= (ushort)(1 << bitPos);
+                                if (s >= thr) observed |= (ushort)(1 << bitPos);
                                 bitPos--;
                             }
                         }
@@ -417,17 +417,34 @@ public static class InkAnchorHandler
                         if (id >= 0)
                         {
                             localHits.Add(new MarkerHit(id, new Rectangle(left, top, win, win)));
-                            // Skip horizontally overlapping windows in this row:
+
+                            // Early-exit as soon as we have one even/odd pair
+                            if (Interlocked.Exchange(ref seen[id], 1) == 0)
+                            {
+                                bool pair =
+                                    (id % 2 == 0 && Volatile.Read(ref seen[id + 1]) != 0) ||
+                                    (id % 2 == 1 && id > 0 && Volatile.Read(ref seen[id - 1]) != 0);
+                                if (pair)
+                                {
+                                    Volatile.Write(ref havePair, 1);
+                                    state.Stop();
+                                    break;
+                                }
+                            }
+
+                            // Skip horizontally overlapping windows for this row
                             left += win - step;
                         }
                     }
-
                     return localHits;
                 },
                 localHits =>
                 {
                     lock (results) results.AddRange(localHits);
                 });
+
+            if (Volatile.Read(ref havePair) != 0)
+                break;
         }
 
         return results;
