@@ -79,6 +79,7 @@ Console.WriteLine($"Filled Area: {filledPercentage * 100:0.##}%");
 - **FillColor** *(Color?)*: Background color, default transparent.
 - **Border** *(InkAnchorBorder?)*: Border styling and settings.
 - **BoxLabel** *(InkAnchorLabel?)*: Label text, placement, and styling.
+- **OuterArUcoMarkers** *(boolean)*: Determines whether ArUco markers are rendered outside the border area.
 
 ### `InkAnchorBorder`
 
