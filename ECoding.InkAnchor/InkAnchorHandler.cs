@@ -26,8 +26,8 @@ public static class InkAnchorHandler
         return svg!;
     }
 
-    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage)
-    => ExtractAllAnchorBoxes(inputImage);
+    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
+    => ExtractAllAnchorBoxes(inputImage, borderBits, minCellPx, maxCellPx);
 
     public static double GetFilledAreaPercentage(Image<Rgba32> image, byte brightnessThreshold = 240)
     {
@@ -555,10 +555,9 @@ public static class InkAnchorHandler
 
     /* ExtractAllAnchorBoxes keeps its public signature – only the internals
        are switched to the new DetectMarkers that yields good hits again. */
-    private static List<(int BoxId, Image<Rgba32> Cropped)>
-        ExtractAllAnchorBoxes(Image<Rgba32> img)
+    private static List<(int BoxId, Image<Rgba32> Cropped)> ExtractAllAnchorBoxes(Image<Rgba32> img, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
     {
-        var hits = DetectMarkers(img).ToList();
+        var hits = DetectMarkers(img, borderBits, minCellPx, maxCellPx).ToList();
         if (hits.Count == 0) return new();
 
         /* build lookup table (same as before) */
