@@ -1,13 +1,14 @@
-﻿using SixLabors.ImageSharp;
+﻿using SixLabors.Fonts;
+using SixLabors.ImageSharp;
+using SixLabors.ImageSharp.Advanced;
+using SixLabors.ImageSharp.Drawing.Processing;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
-using SixLabors.ImageSharp.Drawing.Processing;
-using SixLabors.Fonts;
-using static ECoding.InkAnchor.InkAnchorBorder;
-using System.Text;
-using SixLabors.ImageSharp.Advanced;
-using System.Runtime.CompilerServices;
 using System.Numerics;
+using System.Reflection.Emit;
+using System.Runtime.CompilerServices;
+using System.Text;
+using static ECoding.InkAnchor.InkAnchorBorder;
 
 namespace ECoding.InkAnchor;
 
@@ -25,8 +26,8 @@ public static class InkAnchorHandler
         return svg!;
     }
 
-    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage)
-    => ExtractAllAnchorBoxes(inputImage);
+    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
+    => ExtractAllAnchorBoxes(inputImage, borderBits, minCellPx, maxCellPx);
 
     public static double GetFilledAreaPercentage(Image<Rgba32> image, byte brightnessThreshold = 240)
     {
@@ -116,8 +117,7 @@ public static class InkAnchorHandler
     #region private helpers
 
 
-    private static Task<(Image<Rgba32>? image, string? svg)> GenerateIngAnchorBoxAsync(
-    InkAnchorGeneratorOptions options, bool generateSvg)
+    private static Task<(Image<Rgba32>? image, string? svg)> GenerateIngAnchorBoxAsync(InkAnchorGeneratorOptions options, bool generateSvg)
     {
         ValidateGeneratorOptions(options);
         int width = options.PixelWidth;
@@ -133,12 +133,26 @@ public static class InkAnchorHandler
         if (options.BoxLabel?.LabelPlacement == BoxLabelPlacement.BottomOutsideBox)
             labelExtraBottom = options.BoxLabel.FontSize + 5;
 
-        int totalHeight = labelExtraTop + boxHeight + labelExtraBottom;
-
         // We'll store these so they're not hard-coded
         int markerSize = options.MarkerPixelSize;
         int markerBorderBits = options.MarkerBorderBits;
         int markerPadding = options.MarkerPadding;
+
+        int totalWidth, totalHeight, boxOffsetX, boxOffsetY;
+        if (options.OuterArUcoMarkers)
+        {
+            totalWidth = width + 2 * (markerSize + markerPadding);
+            totalHeight = labelExtraTop + boxHeight + labelExtraBottom + 2 * (markerSize + markerPadding);
+            boxOffsetX = markerSize + markerPadding;
+            boxOffsetY = markerSize + markerPadding + labelExtraTop;
+        }
+        else
+        {
+            totalWidth = width;
+            totalHeight = labelExtraTop + boxHeight + labelExtraBottom;
+            boxOffsetX = 0;
+            boxOffsetY = labelExtraTop;
+        }
 
         if (!generateSvg)
         {
@@ -157,7 +171,11 @@ public static class InkAnchorHandler
                     var border = options.Border;
                     var color = border.Color;
                     float thickness = border.Thickness;
-                    float x = 0, y = labelExtraTop, w = width, h = boxHeight;
+
+                    float borderX = boxOffsetX;
+                    float borderY = boxOffsetY;
+                    float borderW = width;
+                    float borderH = boxHeight;
 
                     // Helper that selects the appropriate drawing method based on the style.
                     void DrawStyledLine(PointF start, PointF end)
@@ -181,30 +199,38 @@ public static class InkAnchorHandler
 
                     // Draw each side if its flag is set.
                     if (border.Sides.HasFlag(BorderSides.Top))
-                        DrawStyledLine(new PointF(x, y), new PointF(x + w, y));
+                        DrawStyledLine(new PointF(borderX, borderY), new PointF(borderX + borderW, borderY));
 
                     if (border.Sides.HasFlag(BorderSides.Right))
-                        DrawStyledLine(new PointF(x + w - 1, y), new PointF(x + w - 1, y + h));
+                        DrawStyledLine(new PointF(borderX + borderW - 1f, borderY), new PointF(borderX + borderW - 1f, borderY + borderH));
 
                     if (border.Sides.HasFlag(BorderSides.Bottom))
-                        DrawStyledLine(new PointF(x, y + h), new PointF(x + w, y + h));
+                        DrawStyledLine(new PointF(borderX, borderY + borderH), new PointF(borderX + borderW, borderY + borderH));
 
                     if (border.Sides.HasFlag(BorderSides.Left))
-                        DrawStyledLine(new PointF(x, y), new PointF(x, y + h));
+                        DrawStyledLine(new PointF(borderX, borderY), new PointF(borderX, borderY + borderH));
                 }
 
                 if (options.BoxLabel != null)
                 {
                     var label = options.BoxLabel;
                     var font = SystemFonts.CreateFont(label.Font, label.FontSize);
-                    float labelY = CalculateLabelY(label, labelExtraTop, boxHeight);
+                    float labelY;
+                    if (options.OuterArUcoMarkers)
+                    {
+                        labelY = CalculateOuterLabelY(label, markerSize, markerPadding, boxOffsetY, boxHeight);
+                    } 
+                    else
+                    {
+                        labelY = CalculateLabelY(label, labelExtraTop, boxHeight);
+                    }
 
                     // Ensure full opacity
                     var color = label.Color.WithAlpha(1f);
 
                     var textOptions = new RichTextOptions(font)
                     {
-                        Origin = new PointF((float)Math.Round(width / 2f), (float)Math.Round(labelY)),
+                        Origin = new PointF((float)Math.Round(totalWidth / 2f), (float)Math.Round(labelY)),
                         HorizontalAlignment = HorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Top
                     };
@@ -213,27 +239,34 @@ public static class InkAnchorHandler
                 }
 
                 // Draw top-left marker
-                ctx.DrawImage(
-                    topLeftMarker,
-                    new SixLabors.ImageSharp.Point(
-                        markerPadding,
-                        labelExtraTop + markerPadding),
-                    1f);
+                if (options.OuterArUcoMarkers)
+                {
+                    ctx.DrawImage(topLeftMarker, new Point(markerPadding, markerPadding + labelExtraTop), 1f);
+                    ctx.DrawImage(bottomRightMarker, new Point(totalWidth - markerSize - markerPadding, totalHeight - markerSize - markerPadding - labelExtraBottom), 1f);
+                } else
+                {
+                    ctx.DrawImage(
+                        topLeftMarker,
+                        new SixLabors.ImageSharp.Point(
+                            markerPadding,
+                            labelExtraTop + markerPadding),
+                        1f);
 
-                // Draw bottom-right marker
-                ctx.DrawImage(
-                    bottomRightMarker,
-                    new SixLabors.ImageSharp.Point(
-                        width - markerSize - markerPadding,
-                        labelExtraTop + boxHeight - markerSize - markerPadding),
-                    1f);
+                    // Draw bottom-right marker
+                    ctx.DrawImage(
+                        bottomRightMarker,
+                        new SixLabors.ImageSharp.Point(
+                            width - markerSize - markerPadding,
+                            labelExtraTop + boxHeight - markerSize - markerPadding),
+                        1f);
+                }
             });
 
             return Task.FromResult<(Image<Rgba32>?, string?)>((image, null));
         }
         else
         {
-            var svg = GenerateSvg(options, boxId, markerSize, markerBorderBits, labelExtraTop, boxHeight, width, totalHeight, markerPadding);
+            var svg = GenerateSvg(options, boxId, markerSize, markerBorderBits, labelExtraTop, labelExtraBottom, boxHeight, width, totalWidth, totalHeight, markerPadding, boxOffsetX, boxOffsetY);
 
             return Task.FromResult<(Image<Rgba32>?, string?)>((null, svg));
         }
@@ -522,10 +555,9 @@ public static class InkAnchorHandler
 
     /* ExtractAllAnchorBoxes keeps its public signature – only the internals
        are switched to the new DetectMarkers that yields good hits again. */
-    private static List<(int BoxId, Image<Rgba32> Cropped)>
-        ExtractAllAnchorBoxes(Image<Rgba32> img)
+    private static List<(int BoxId, Image<Rgba32> Cropped)> ExtractAllAnchorBoxes(Image<Rgba32> img, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
     {
-        var hits = DetectMarkers(img).ToList();
+        var hits = DetectMarkers(img, borderBits, minCellPx, maxCellPx).ToList();
         if (hits.Count == 0) return new();
 
         /* build lookup table (same as before) */
@@ -615,7 +647,18 @@ public static class InkAnchorHandler
         };
     }
 
-    private static string GenerateSvg(InkAnchorGeneratorOptions options, byte boxId, int markerSize, int markerBorderBits, int labelExtraTop, int boxHeight, int width, int totalHeight, int markerPadding)
+    private static float CalculateOuterLabelY(InkAnchorLabel label, int markerSize, int markerPadding, int boxOffsetY, int boxHeight)
+    {
+        const float padding = 5;
+        return label.LabelPlacement switch
+        {
+            BoxLabelPlacement.TopOutsideBox => markerSize + markerPadding + padding,
+            BoxLabelPlacement.BottomOutsideBox => boxOffsetY + boxHeight + padding,
+            _ => boxOffsetY + boxHeight - label.FontSize - padding
+        };
+    }
+
+    private static string GenerateSvg(InkAnchorGeneratorOptions options, byte boxId, int markerSize, int markerBorderBits, int labelExtraTop, int labelExtraBottom, int boxHeight, int width, int totalWidth, int totalHeight, int markerPadding, int boxOffsetX, int boxOffsetY)
     {
         var svgTopLeft = CustomArucoDrawer.GenerateArucoMarkerSvgManually(boxId * 2, markerSize, markerBorderBits);
         var svgBottomRight = CustomArucoDrawer.GenerateArucoMarkerSvgManually(boxId * 2 + 1, markerSize, markerBorderBits);
@@ -625,15 +668,24 @@ public static class InkAnchorHandler
         string labelSvg = string.Empty;
         if (options.BoxLabel is { } labelOpt)
         {
-            var extraY = 12;
-            if (labelOpt.LabelPlacement == BoxLabelPlacement.TopOutsideBox)
+            float labelY;
+            if (options.OuterArUcoMarkers)
             {
-                extraY *= -1;
+                labelY = CalculateOuterLabelY(options.BoxLabel, markerSize, markerPadding, boxOffsetY, boxHeight);
+            }
+            else
+            {
+                labelY = CalculateLabelY(options.BoxLabel, labelExtraTop, boxHeight);
             }
 
-            float labelY = CalculateLabelY(labelOpt, labelExtraTop, boxHeight) + extraY;
+            int baselineAdjust = 12;
+            if (options.BoxLabel.LabelPlacement == BoxLabelPlacement.TopOutsideBox)
+            {
+                baselineAdjust *= -1;
+            }
+            labelY += baselineAdjust;
             labelSvg = $"""
-                    <text x="{width / 2}" 
+                    <text x="{totalWidth / 2}" 
                           y="{labelY}" 
                           text-anchor="middle" 
                           font-size="{labelOpt.FontSize}" 
@@ -660,35 +712,50 @@ public static class InkAnchorHandler
             string stroke = border.Color.ToSvgHex();
             int thickness = border.Thickness;
 
-            int x1 = 0, y1 = labelExtraTop;
-            int x2 = width, y2 = labelExtraTop + boxHeight;
+            int borderX = boxOffsetX;
+            int borderRightX = borderX + width;
+            int borderY = boxOffsetY;
+            int borderBottomY = boxOffsetY + boxHeight;
+
 
             var linesBuilder = new StringBuilder();
 
             if (border.Sides.HasFlag(BorderSides.Top))
-                linesBuilder.AppendLine($"<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y1}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
+                linesBuilder.AppendLine($"<line x1=\"{borderX}\" y1=\"{borderY}\" x2=\"{borderRightX}\" y2=\"{borderY}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
 
             if (border.Sides.HasFlag(BorderSides.Right))
-                linesBuilder.AppendLine($"<line x1=\"{x2}\" y1=\"{y1}\" x2=\"{x2}\" y2=\"{y2}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
+                linesBuilder.AppendLine($"<line x1=\"{borderRightX}\" y1=\"{borderY}\" x2=\"{borderRightX}\" y2=\"{borderBottomY}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
 
             if (border.Sides.HasFlag(BorderSides.Bottom))
-                linesBuilder.AppendLine($"<line x1=\"{x1}\" y1=\"{y2}\" x2=\"{x2}\" y2=\"{y2}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
+                linesBuilder.AppendLine($"<line x1=\"{borderX}\" y1=\"{borderBottomY}\" x2=\"{borderRightX}\" y2=\"{borderBottomY}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
 
             if (border.Sides.HasFlag(BorderSides.Left))
-                linesBuilder.AppendLine($"<line x1=\"{x1}\" y1=\"{y1}\" x2=\"{x1}\" y2=\"{y2}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
+                linesBuilder.AppendLine($"<line x1=\"{borderX}\" y1=\"{borderY}\" x2=\"{borderX}\" y2=\"{borderBottomY}\" stroke=\"{stroke}\" stroke-width=\"{thickness}\" stroke-dasharray=\"{dashArray}\" />");
 
             borderLinesSvg = linesBuilder.ToString();
         }
 
+        string topLeftMarkerPos, bottomRightMarkerPos;
+        if (options.OuterArUcoMarkers)
+        {
+            topLeftMarkerPos = $"translate({markerPadding},{markerPadding + labelExtraTop})";
+            bottomRightMarkerPos = $"translate({totalWidth - markerSize - markerPadding},{totalHeight - markerSize - markerPadding - labelExtraBottom})";
+        }
+        else
+        {
+            topLeftMarkerPos = $"translate({markerPadding},{labelExtraTop + markerPadding})";
+            bottomRightMarkerPos = $"translate({width - markerSize - markerPadding},{labelExtraTop + boxHeight - markerSize - markerPadding})";
+        }
+
         string svg = $"""
-            <svg width="{width}" height="{totalHeight}" xmlns="http://www.w3.org/2000/svg">
-              <rect x="0" y="{labelExtraTop}" width="{width}" height="{boxHeight}" fill="{fillColor}" stroke="none"/>
+            <svg width="{totalWidth}" height="{totalHeight}" xmlns="http://www.w3.org/2000/svg">
+              <rect x="{boxOffsetX}" y="{boxOffsetY}" width="{width}" height="{boxHeight}" fill="{fillColor}" stroke="none"/>
               {borderLinesSvg}
               {labelSvg}
-              <g transform="translate({markerPadding},{labelExtraTop + markerPadding})">
+              <g transform="{topLeftMarkerPos}">
                 {svgTopLeft}
               </g>
-              <g transform="translate({width - markerSize - markerPadding},{labelExtraTop + boxHeight - markerSize - markerPadding})">
+              <g transform="{bottomRightMarkerPos}">
                 {svgBottomRight}
               </g>
             </svg>

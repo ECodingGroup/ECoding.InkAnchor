@@ -58,6 +58,11 @@ public class InkAnchorGeneratorOptions
     /// The border settings for the box
     /// </summary>
     public InkAnchorBorder? Border { get; set; }
+
+    /// <summary>
+    /// Determines whether ArUco markers are rendered outside the border area.
+    /// </summary>
+    public bool OuterArUcoMarkers { get; set; } = false;
 }
 
 public class InkAnchorLabel
