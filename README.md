@@ -57,6 +57,29 @@ foreach (var (boxId, croppedImage) in extractedBoxes)
 }
 ```
 
+#### Advanced Detection Options
+For challenging scenarios like scanned documents or low-contrast images, customize detection parameters:
+
+```csharp
+using var inputImage = Image.Load<Rgba32>("scanned_page.png");
+
+var options = new AnchorBoxDetectionOptions
+{
+    BorderBits = 1,              // Quiet zone width (default: 1)
+    MinCellPx = 4,               // Minimum cell size in pixels (default: 4)
+    MaxCellPx = 60,              // Maximum cell size in pixels (default: 14)
+    BinaryThreshold = 0.5f,      // Optional: Convert to black/white for better detection
+    Rotations = new[] { 0f, 90f, 180f, 270f }  // Optional: Try rotations for angled scans
+};
+
+var extractedBoxes = InkAnchorHandler.GetAnchorBoxesContentImage(inputImage, options);
+
+foreach (var (boxId, croppedImage) in extractedBoxes)
+{
+    await croppedImage.SaveAsync($"extracted_box_{boxId}.png");
+}
+```
+
 ### Evaluating Filled Area Percentage
 
 ```csharp
