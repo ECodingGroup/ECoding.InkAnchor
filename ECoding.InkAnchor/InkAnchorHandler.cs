@@ -26,8 +26,13 @@ public static class InkAnchorHandler
         return svg!;
     }
 
-    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(Image<Rgba32> inputImage, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
-    => ExtractAllAnchorBoxes(inputImage, borderBits, minCellPx, maxCellPx);
+    public static List<(int BoxId, Image<Rgba32> Cropped)> GetAnchorBoxesContentImage(
+        Image<Rgba32> inputImage,
+        AnchorBoxDetectionOptions? options = null)
+    {
+        options ??= new AnchorBoxDetectionOptions();
+        return ExtractAllAnchorBoxes(inputImage, options);
+    }
 
     public static double GetFilledAreaPercentage(Image<Rgba32> image, byte brightnessThreshold = 240)
     {
@@ -555,35 +560,159 @@ public static class InkAnchorHandler
 
     /* ExtractAllAnchorBoxes keeps its public signature – only the internals
        are switched to the new DetectMarkers that yields good hits again. */
-    private static List<(int BoxId, Image<Rgba32> Cropped)> ExtractAllAnchorBoxes(Image<Rgba32> img, int borderBits = 1, int minCellPx = 4, int maxCellPx = 14)
+
+    /// <summary>
+    /// Detects all anchor box positions in the image by finding pairs of ArUco markers.
+    /// Each anchor box is defined by a top-left (even ID) and bottom-right (odd ID) marker pair.
+    /// Returns the content area between these markers, excluding the markers themselves.
+    /// </summary>
+    /// <param name="img">The image to search for anchor box markers</param>
+    /// <param name="options">Detection options for marker scanning parameters</param>
+    /// <returns>List of anchor box IDs and their rectangular positions in the image</returns>
+    private static List<(int BoxId, Rectangle Position)> ExtractAllAnchorBoxesPositions(Image<Rgba32> img, AnchorBoxDetectionOptions options)
     {
-        var hits = DetectMarkers(img, borderBits, minCellPx, maxCellPx).ToList();
+        options ??= new AnchorBoxDetectionOptions();
+
+        var hits = DetectMarkers(img, options.BorderBits, options.MinCellPx, options.MaxCellPx).ToList();
         if (hits.Count == 0) return new();
 
-        /* build lookup table (same as before) */
+        /* build lookup table */
         var map = new Dictionary<int, Rectangle>();
         foreach (var h in hits)
-        { map.TryAdd(h.Id, h.Rect); }
-        var result = new List<(int, Image<Rgba32>)>();
+        {
+            map.TryAdd(h.Id, h.Rect);
+        }
 
+        var result = new List<(int, Rectangle)>();
         foreach (int id in map.Keys.OrderBy(k => k))
         {
             if (id % 2 != 0) continue;       // we want the TL marker (even)
             int brId = id + 1;
             if (!map.TryGetValue(brId, out var brRect)) continue;
-            var tlRect = map[id];
 
+            var tlRect = map[id];
             int left = tlRect.Right + 2;
             int top = tlRect.Bottom + 2;
             int right = brRect.Left - 2;
             int bottom = brRect.Top - 2;
+
             if (right <= left || bottom <= top) continue;
 
             var box = new Rectangle(left, top, right - left, bottom - top);
-            var cropped = img.Clone(ctx => ctx.Crop(box));
-            result.Add((id / 2, cropped));
+            result.Add((id / 2, box));
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Crops regions from an image based on provided rectangular positions.
+    /// Creates cloned image segments for each position, useful for extracting
+    /// anchor box content areas as separate images.
+    /// </summary>
+    /// <param name="image">The source image to crop from</param>
+    /// <param name="positions">List of box IDs and their rectangular positions to crop</param>
+    /// <returns>List of box IDs with their corresponding cropped image segments</returns>
+    private static List<(int BoxId, Image<Rgba32> Cropped)> CropImages(Image<Rgba32> image, List<(int BoxId, Rectangle Position)> positions)
+    {
+        var result = new List<(int, Image<Rgba32>)>();
+        foreach (var (boxId, position) in positions)
+        {
+            var cropped = image.Clone(ctx => ctx.Crop(position));
+            result.Add((boxId, cropped));
         }
         return result;
+    }
+
+    /// <summary>
+    /// Attempts to detect anchor boxes by applying rotations to the detection image.
+    /// When markers are found, applies the same rotation to the original image before cropping.
+    /// This is particularly useful when documents are scanned at an angle via physical scanner.
+    /// </summary>
+    /// <param name="imageFrom">The image to use for detection (may have enhancements like binary threshold applied)</param>
+    /// <param name="originalImage">The original unmodified image to crop from</param>
+    /// <param name="options">Detection options including rotation angles to try</param>
+    /// <returns>List of cropped anchor box images from the original image</returns>
+    private static List<(int BoxId, Image<Rgba32> Cropped)> ApplyRotationsAndGetAllAnchorBoxes(
+        Image<Rgba32> imageFrom,
+        Image<Rgba32> originalImage,
+        AnchorBoxDetectionOptions options)
+    {
+        foreach (var rotation in options.Rotations)
+        {
+            using var rotatedDetection = imageFrom.Clone(ctx => ctx.Rotate(rotation));
+
+            var positions = ExtractAllAnchorBoxesPositions(rotatedDetection, options);
+            if (positions.Count > 0)
+            {
+                // Found markers in rotated image - apply same rotation to original and crop
+                using var rotatedOriginal = originalImage.Clone(ctx => ctx.Rotate(rotation));
+                return CropImages(rotatedOriginal, positions);
+            }
+        }
+
+        return [];
+    }
+
+    /// <summary>
+    /// Extracts all anchor boxes from an image using a multi-stage detection strategy.
+    /// Tries detection with progressively more enhancements: first on the original image,
+    /// then with binary threshold, and finally with rotations. This approach balances
+    /// detection success rate with performance.
+    /// </summary>
+    /// <param name="originalImage">The original image to extract anchor boxes from</param>
+    /// <param name="options">Detection options including optional enhancements (binary threshold, rotations)</param>
+    /// <returns>List of cropped anchor box images with their box IDs</returns>
+    private static List<(int BoxId, Image<Rgba32> Cropped)> ExtractAllAnchorBoxes(
+        Image<Rgba32> originalImage,
+        AnchorBoxDetectionOptions options)
+    {
+        // Stage 1: Attempt detection on the original image without any modifications
+        var positionsFromOriginal = ExtractAllAnchorBoxesPositions(originalImage, options);
+        if (positionsFromOriginal.Count > 0)
+        {
+            return CropImages(originalImage, positionsFromOriginal);
+        }
+
+        // Stage 2: Apply binary threshold if specified
+        // Converting to black/white often improves detection on low-contrast or noisy images
+        if (options.BinaryThreshold != null)
+        {
+            using var binaryVersion = originalImage.Clone(ctx => {
+                ctx.Grayscale()
+                    .BinaryThreshold(options.BinaryThreshold.Value);
+            });
+
+            var positionsFromBinary = ExtractAllAnchorBoxesPositions(binaryVersion, options);
+            if (positionsFromBinary.Count > 0)
+            {
+                return CropImages(originalImage, positionsFromBinary);
+            }
+
+            // Stage 2b: Try rotations on the binary image
+            // Combines both enhancements for maximum detection success
+            if (options.Rotations != null && options.Rotations.Length > 0)
+            {
+                var resultFromBinaryRotated = ApplyRotationsAndGetAllAnchorBoxes(binaryVersion, originalImage, options);
+                if (resultFromBinaryRotated.Count > 0)
+                {
+                    return resultFromBinaryRotated;
+                }
+            }
+        }
+
+        // Stage 3: Apply rotations if specified
+        // Useful for documents scanned at an angle via physical scanner
+        if (options.Rotations != null && options.Rotations.Length > 0)
+        {
+            var resultFromRotated = ApplyRotationsAndGetAllAnchorBoxes(originalImage, originalImage, options);
+            if (resultFromRotated.Count > 0)
+            {
+                return resultFromRotated;
+            }
+        }
+
+        return [];
     }
 
     private static void ValidateGeneratorOptions(InkAnchorGeneratorOptions options)
